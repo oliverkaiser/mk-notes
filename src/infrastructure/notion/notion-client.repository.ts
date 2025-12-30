@@ -299,9 +299,22 @@ export class NotionClientRepository implements NotionClientRepositoryInterface {
   }: {
     blockId: string;
   }): Promise<BlockObjectResponse[]> {
-    const response = await this.client.blocks.children.list({
-      block_id: blockId,
-    });
-    return response.results as BlockObjectResponse[];
+    // Handle pagination to get all blocks, not just the first 100
+    const allBlocks: BlockObjectResponse[] = [];
+    let startCursor: string | undefined = undefined;
+    let hasMore = true;
+
+    while (hasMore) {
+      const response = await this.client.blocks.children.list({
+        block_id: blockId,
+        start_cursor: startCursor,
+      });
+
+      allBlocks.push(...(response.results as BlockObjectResponse[]));
+      hasMore = response.has_more;
+      startCursor = response.next_cursor ?? undefined;
+    }
+
+    return allBlocks;
   }
 }

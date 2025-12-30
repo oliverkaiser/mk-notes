@@ -341,6 +341,24 @@ export class SynchronizeMarkdownToNotion<T, U extends Page> {
       });
 
       if (existingPage) {
+        // If clean sync is enabled, delete all existing blocks before updating
+        if (cleanSync) {
+          this.logger.info(
+            `Clean sync enabled - removing existing content from page ${pageElement.id}`
+          );
+          try {
+            await this.destinationRepository.deleteChildBlocks({
+              parentPageId: pageElement.id,
+            });
+            this.logger.info('Successfully removed existing content');
+          } catch (error) {
+            this.logger.warn(
+              'Failed to remove existing content, continuing with sync',
+              { error }
+            );
+          }
+        }
+
         await this.destinationRepository.updatePage({
           pageElement,
           pageId: pageElement.id,

@@ -1,3 +1,4 @@
+import { Client } from '@notionhq/client';
 import {
   BlockObjectResponse,
   DatabaseObjectResponse,
@@ -24,6 +25,16 @@ import {
   PageLockedStatus,
 } from '@/domains/synchronization/repositories/destination.repository';
 import { NotionConverterRepository } from '@/infrastructure/converters/notion/notion.converter';
+
+interface ListBlockChildrenResponse {
+  results: BlockObjectResponse[];
+  has_more: boolean;
+  next_cursor: string | null;
+}
+
+interface NotionClientRepositoryWithClient extends NotionClientRepository {
+  client: Client;
+}
 
 export interface UpdatePageInput {
   pageId: string;
@@ -55,6 +66,7 @@ export class NotionDestinationRepository
 
   /**
    * Delete all child blocks from a parent page
+   * Handles pagination to ensure all blocks are deleted
    */
   async deleteChildBlocks({
     parentPageId,
@@ -62,14 +74,43 @@ export class NotionDestinationRepository
     parentPageId: string;
   }): Promise<void> {
     try {
-      // Get all blocks in the parent page
-      const blocks = await this.notionClient.getBlockChildren({
-        blockId: parentPageId,
-      });
+      // Get all blocks in the parent page, handling pagination
+      // Notion API returns blocks in pages of up to 100, so we need to paginate
+      const allBlocks: string[] = [];
+      let startCursor: string | undefined = undefined;
+      let hasMore = true;
 
-      await this.notionClient.deleteBlocks({
-        blockIds: blocks.map((block) => block.id),
-      });
+      // Access the underlying Notion client to handle pagination
+      // The NotionClientRepository interface doesn't expose pagination, so we need
+      // to access the implementation's client property
+      const notionClientImpl = this
+        .notionClient as NotionClientRepositoryWithClient;
+      if (!notionClientImpl?.client) {
+        throw new Error('Notion client implementation does not expose client');
+      }
+
+      while (hasMore) {
+        const response = (await notionClientImpl.client.blocks.children.list({
+          block_id: parentPageId,
+          start_cursor: startCursor,
+        })) as ListBlockChildrenResponse;
+
+        allBlocks.push(...response.results.map((block) => block.id));
+        hasMore = response.has_more;
+        startCursor = response.next_cursor ?? undefined;
+      }
+
+      // Delete all blocks in batches if needed (Notion API may have limits)
+      if (allBlocks.length > 0) {
+        // Delete in batches of 100 to avoid API limits
+        const batchSize = 100;
+        for (let i = 0; i < allBlocks.length; i += batchSize) {
+          const batch = allBlocks.slice(i, i + batchSize);
+          await this.notionClient.deleteBlocks({
+            blockIds: batch,
+          });
+        }
+      }
     } catch (error: unknown) {
       // Deletion failed - throw the error to be handled upstream
       throw error instanceof Error ? error : new Error(String(error));

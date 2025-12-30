@@ -713,52 +713,119 @@ export class NotionConverterRepository
   }
 
   private async convertListItem(
-    element: ListItemElement
+    element: ListItemElement,
+    depth: number = 0
   ): Promise<BulletedListItemBlock | NumberedListItemBlock> {
     let item: BulletedListItemBlock | NumberedListItemBlock;
     if (element.listType === 'unordered') {
-      item = await this.convertBulletedListItem(element);
+      item = await this.convertBulletedListItem(element, depth);
     } else {
-      item = await this.convertNumberedListItem(element);
+      item = await this.convertNumberedListItem(element, depth);
     }
 
     return item;
   }
 
   private async convertBulletedListItem(
-    element: ListItemElement
+    element: ListItemElement,
+    depth: number = 0
   ): Promise<BulletedListItemBlock> {
     return {
       type: 'bulleted_list_item',
       object: 'block',
       bulleted_list_item: {
         rich_text: this.convertRichText(element.text),
-        children: await this.convertListItemChildren(element.children),
+        children: await this.convertListItemChildren(element.children, depth),
       },
     };
   }
 
   private async convertNumberedListItem(
-    element: ListItemElement
+    element: ListItemElement,
+    depth: number = 0
   ): Promise<NumberedListItemBlock> {
     return {
       type: 'numbered_list_item',
       object: 'block',
       numbered_list_item: {
         rich_text: this.convertRichText(element.text),
-        children: await this.convertListItemChildren(element.children),
+        children: await this.convertListItemChildren(element.children, depth),
       },
     };
   }
 
   private async convertListItemChildren(
-    children: ListItemElement['children']
+    children: ListItemElement['children'],
+    depth: number = 0
   ): Promise<BlockObjectRequestWithoutChildren[] | undefined> {
+    // Notion API supports maximum 3 levels of nesting (depth 0, 1, 2)
+    // When we reach depth 2, convert nested list items to paragraphs instead
+    const MAX_NESTING_DEPTH = 2;
+
     const convertedChildren = (
       await Promise.all(
-        children?.map(async (child) => this.convertElement(child)) ?? []
+        children?.map(async (child) => {
+          // If we're at max depth and the child is a list item, convert it to a paragraph
+          if (
+            depth >= MAX_NESTING_DEPTH &&
+            child.type === ElementType.ListItem
+          ) {
+            const listItem = child as ListItemElement;
+            const listPrefix = listItem.listType === 'ordered' ? '• ' : '• ';
+            const textContent = this.convertRichText(listItem.text);
+
+            // Prepend the list prefix to the first text element if available
+            if (textContent.length > 0 && textContent[0].type === 'text') {
+              textContent[0].text.content =
+                listPrefix + textContent[0].text.content;
+            } else if (textContent.length === 0) {
+              textContent.push({
+                type: 'text',
+                text: { content: listPrefix },
+              });
+            }
+
+            // Convert the list item to a paragraph
+            const paragraph: BlockObjectRequestWithoutChildren = {
+              type: 'paragraph',
+              object: 'block',
+              paragraph: {
+                rich_text: textContent,
+                color: 'default',
+              },
+            };
+
+            // If the list item has children, convert them to paragraphs as well
+            if (listItem.children && listItem.children.length > 0) {
+              const nestedParagraphs = await this.convertListItemChildren(
+                listItem.children,
+                depth + 1
+              );
+
+              // Return both the paragraph and its nested children
+              if (nestedParagraphs && nestedParagraphs.length > 0) {
+                return [paragraph, ...nestedParagraphs];
+              }
+            }
+
+            return paragraph;
+          }
+
+          // For list items, pass the incremented depth
+          if (child.type === ElementType.ListItem) {
+            return await this.convertListItem(
+              child as ListItemElement,
+              depth + 1
+            );
+          }
+
+          // For other elements, convert normally
+          return await this.convertElement(child);
+        }) ?? []
       )
-    ).filter((child) => child !== null) as BlockObjectRequestWithoutChildren[];
+    )
+      .flat()
+      .filter((child) => child !== null) as BlockObjectRequestWithoutChildren[];
 
     if (convertedChildren.length === 0) {
       return undefined;

@@ -114,6 +114,15 @@ describe('SiteMap', () => {
       expect(guideChild?.filepath).toBe('docs/guide.md');
     });
 
+    it('should promote single nested file to root', () => {
+      const siteMap = SiteMap.buildFromFilePaths([
+        'Team Projects/OE/Stock Management + Automated Purchasing/PRD - Stock Management + Automated Purchasing.md'
+      ]);
+
+      expect(siteMap.root.filepath).toBe('Team Projects/OE/Stock Management + Automated Purchasing/PRD - Stock Management + Automated Purchasing.md');
+      expect(siteMap.root.children).toHaveLength(0);
+    });
+
   });
 
   describe('fromJSON/toJSON', () => {

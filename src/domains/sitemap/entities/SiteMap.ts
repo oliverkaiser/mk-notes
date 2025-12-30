@@ -110,13 +110,13 @@ export class SiteMap {
 
     // Handle root-level index.md separately
     if (node === this._root && !node.filepath) {
-      // Look for ANY index.md file that should be treated as root content
-      // This includes both relative paths (index.md) and full paths (*/index.md)
+      // Look for index.md file first (priority)
       const rootIndexChild = node.children.find(
         (child) => path.basename(child.filepath) === 'index.md'
       );
 
       if (rootIndexChild) {
+        // Existing index.md logic
         node.filepath = rootIndexChild.filepath;
         // Remove index.md from children and merge its children
         const nonIndexChildren = node.children.filter(
@@ -126,6 +126,18 @@ export class SiteMap {
         rootIndexChild.children.forEach((child) => {
           child.parent = node;
         });
+      } else if (node.children.length === 1) {
+        // NEW: Handle single file case (not index.md)
+        const [singleChild] = node.children;
+        if (singleChild.filepath) {
+          node.filepath = singleChild.filepath;
+          node.id = singleChild.id;
+          // Merge children: singleChild's children + remaining (none in this case)
+          node.children = [...singleChild.children];
+          singleChild.children.forEach((child) => {
+            child.parent = node;
+          });
+        }
       }
     }
   }

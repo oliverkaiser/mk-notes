@@ -268,18 +268,21 @@ export class SynchronizeMarkdownToNotion<T, U extends Page> {
 
     // If not flattening, synchronize the root node
     if (!flatten) {
-      const { page: rootPageElement, treeNodeId: rootTreeNodeId } =
-        await this.synchronizeRootNode({
-          node: nodeToSync,
-          parentObjectId,
-          parentObjectType,
-          lockPage,
-          cleanSync,
-          forceNew,
-          flatten,
-        });
+      // Only sync root if it has a filepath, or if it has no children
+      if (nodeToSync.filepath || nodeToSync.children.length === 0) {
+        const { page: rootPageElement, treeNodeId: rootTreeNodeId } =
+          await this.synchronizeRootNode({
+            node: nodeToSync,
+            parentObjectId,
+            parentObjectType,
+            lockPage,
+            cleanSync,
+            forceNew,
+            flatten,
+          });
 
-      results.push({ page: rootPageElement, treeNodeId: rootTreeNodeId });
+        results.push({ page: rootPageElement, treeNodeId: rootTreeNodeId });
+      }
     }
 
     for (const childNode of node.children) {

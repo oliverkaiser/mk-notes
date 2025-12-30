@@ -80256,6 +80256,19 @@ class SynchronizeMarkdownToNotion {
                 pageId: pageElement.id,
             });
             if (existingPage) {
+                // If clean sync is enabled, delete all existing blocks before updating
+                if (cleanSync) {
+                    this.logger.info(`Clean sync enabled - removing existing content from page ${pageElement.id}`);
+                    try {
+                        await this.destinationRepository.deleteChildBlocks({
+                            parentPageId: pageElement.id,
+                        });
+                        this.logger.info('Successfully removed existing content');
+                    }
+                    catch (error) {
+                        this.logger.warn('Failed to remove existing content, continuing with sync', { error });
+                    }
+                }
                 await this.destinationRepository.updatePage({
                     pageElement,
                     pageId: pageElement.id,
@@ -81924,16 +81937,43 @@ class NotionDestinationRepository {
     }
     /**
      * Delete all child blocks from a parent page
+     * Handles pagination to ensure all blocks are deleted
      */
     async deleteChildBlocks({ parentPageId, }) {
         try {
-            // Get all blocks in the parent page
-            const blocks = await this.notionClient.getBlockChildren({
-                blockId: parentPageId,
-            });
-            await this.notionClient.deleteBlocks({
-                blockIds: blocks.map((block) => block.id),
-            });
+            // Get all blocks in the parent page, handling pagination
+            // Notion API returns blocks in pages of up to 100, so we need to paginate
+            const allBlocks = [];
+            let startCursor = undefined;
+            let hasMore = true;
+            // Access the underlying Notion client to handle pagination
+            // The NotionClientRepository interface doesn't expose pagination, so we need
+            // to access the implementation's client property
+            const notionClientImpl = this
+                .notionClient;
+            if (!notionClientImpl?.client) {
+                throw new Error('Notion client implementation does not expose client');
+            }
+            while (hasMore) {
+                const response = (await notionClientImpl.client.blocks.children.list({
+                    block_id: parentPageId,
+                    start_cursor: startCursor,
+                }));
+                allBlocks.push(...response.results.map((block) => block.id));
+                hasMore = response.has_more;
+                startCursor = response.next_cursor ?? undefined;
+            }
+            // Delete all blocks in batches if needed (Notion API may have limits)
+            if (allBlocks.length > 0) {
+                // Delete in batches of 100 to avoid API limits
+                const batchSize = 100;
+                for (let i = 0; i < allBlocks.length; i += batchSize) {
+                    const batch = allBlocks.slice(i, i + batchSize);
+                    await this.notionClient.deleteBlocks({
+                        blockIds: batch,
+                    });
+                }
+            }
         }
         catch (error) {
             // Deletion failed - throw the error to be handled upstream
@@ -82422,10 +82462,20 @@ class NotionClientRepository {
         return response;
     }
     async getBlockChildren({ blockId, }) {
-        const response = await this.client.blocks.children.list({
-            block_id: blockId,
-        });
-        return response.results;
+        // Handle pagination to get all blocks, not just the first 100
+        const allBlocks = [];
+        let startCursor = undefined;
+        let hasMore = true;
+        while (hasMore) {
+            const response = await this.client.blocks.children.list({
+                block_id: blockId,
+                start_cursor: startCursor,
+            });
+            allBlocks.push(...response.results);
+            hasMore = response.has_more;
+            startCursor = response.next_cursor ?? undefined;
+        }
+        return allBlocks;
     }
 }
 exports.NotionClientRepository = NotionClientRepository;

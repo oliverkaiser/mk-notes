@@ -79696,10 +79696,10 @@ class SiteMap {
         }
         // Handle root-level index.md separately
         if (node === this._root && !node.filepath) {
-            // Look for ANY index.md file that should be treated as root content
-            // This includes both relative paths (index.md) and full paths (*/index.md)
+            // Look for index.md file first (priority)
             const rootIndexChild = node.children.find((child) => path.basename(child.filepath) === 'index.md');
             if (rootIndexChild) {
+                // Existing index.md logic
                 node.filepath = rootIndexChild.filepath;
                 // Remove index.md from children and merge its children
                 const nonIndexChildren = node.children.filter((child) => child !== rootIndexChild);
@@ -79707,6 +79707,19 @@ class SiteMap {
                 rootIndexChild.children.forEach((child) => {
                     child.parent = node;
                 });
+            }
+            else if (node.children.length === 1) {
+                // NEW: Handle single file case (not index.md)
+                const [singleChild] = node.children;
+                if (singleChild.filepath) {
+                    node.filepath = singleChild.filepath;
+                    node.id = singleChild.id;
+                    // Merge children: singleChild's children + remaining (none in this case)
+                    node.children = [...singleChild.children];
+                    singleChild.children.forEach((child) => {
+                        child.parent = node;
+                    });
+                }
             }
         }
     }
@@ -80195,16 +80208,19 @@ class SynchronizeMarkdownToNotion {
         let rootPageElement;
         // If not flattening, synchronize the root node
         if (!flatten) {
-            const { page: rootPageElement, treeNodeId: rootTreeNodeId } = await this.synchronizeRootNode({
-                node: nodeToSync,
-                parentObjectId,
-                parentObjectType,
-                lockPage,
-                cleanSync,
-                forceNew,
-                flatten,
-            });
-            results.push({ page: rootPageElement, treeNodeId: rootTreeNodeId });
+            // Only sync root if it has a filepath, or if it has no children
+            if (nodeToSync.filepath || nodeToSync.children.length === 0) {
+                const { page: rootPageElement, treeNodeId: rootTreeNodeId } = await this.synchronizeRootNode({
+                    node: nodeToSync,
+                    parentObjectId,
+                    parentObjectType,
+                    lockPage,
+                    cleanSync,
+                    forceNew,
+                    flatten,
+                });
+                results.push({ page: rootPageElement, treeNodeId: rootTreeNodeId });
+            }
         }
         for (const childNode of node.children) {
             try {
@@ -81153,38 +81169,86 @@ class NotionConverterRepository {
             callout: calloutParams,
         };
     }
-    async convertListItem(element) {
+    async convertListItem(element, depth = 0) {
         let item;
         if (element.listType === 'unordered') {
-            item = await this.convertBulletedListItem(element);
+            item = await this.convertBulletedListItem(element, depth);
         }
         else {
-            item = await this.convertNumberedListItem(element);
+            item = await this.convertNumberedListItem(element, depth);
         }
         return item;
     }
-    async convertBulletedListItem(element) {
+    async convertBulletedListItem(element, depth = 0) {
         return {
             type: 'bulleted_list_item',
             object: 'block',
             bulleted_list_item: {
                 rich_text: this.convertRichText(element.text),
-                children: await this.convertListItemChildren(element.children),
+                children: await this.convertListItemChildren(element.children, depth),
             },
         };
     }
-    async convertNumberedListItem(element) {
+    async convertNumberedListItem(element, depth = 0) {
         return {
             type: 'numbered_list_item',
             object: 'block',
             numbered_list_item: {
                 rich_text: this.convertRichText(element.text),
-                children: await this.convertListItemChildren(element.children),
+                children: await this.convertListItemChildren(element.children, depth),
             },
         };
     }
-    async convertListItemChildren(children) {
-        const convertedChildren = (await Promise.all(children?.map(async (child) => this.convertElement(child)) ?? [])).filter((child) => child !== null);
+    async convertListItemChildren(children, depth = 0) {
+        // Notion API supports maximum 3 levels of nesting (depth 0, 1, 2)
+        // When we reach depth 2, convert nested list items to paragraphs instead
+        const MAX_NESTING_DEPTH = 2;
+        const convertedChildren = (await Promise.all(children?.map(async (child) => {
+            // If we're at max depth and the child is a list item, convert it to a paragraph
+            if (depth >= MAX_NESTING_DEPTH &&
+                child.type === elements_1.ElementType.ListItem) {
+                const listItem = child;
+                const listPrefix = listItem.listType === 'ordered' ? '• ' : '• ';
+                const textContent = this.convertRichText(listItem.text);
+                // Prepend the list prefix to the first text element if available
+                if (textContent.length > 0 && textContent[0].type === 'text') {
+                    textContent[0].text.content =
+                        listPrefix + textContent[0].text.content;
+                }
+                else if (textContent.length === 0) {
+                    textContent.push({
+                        type: 'text',
+                        text: { content: listPrefix },
+                    });
+                }
+                // Convert the list item to a paragraph
+                const paragraph = {
+                    type: 'paragraph',
+                    object: 'block',
+                    paragraph: {
+                        rich_text: textContent,
+                        color: 'default',
+                    },
+                };
+                // If the list item has children, convert them to paragraphs as well
+                if (listItem.children && listItem.children.length > 0) {
+                    const nestedParagraphs = await this.convertListItemChildren(listItem.children, depth + 1);
+                    // Return both the paragraph and its nested children
+                    if (nestedParagraphs && nestedParagraphs.length > 0) {
+                        return [paragraph, ...nestedParagraphs];
+                    }
+                }
+                return paragraph;
+            }
+            // For list items, pass the incremented depth
+            if (child.type === elements_1.ElementType.ListItem) {
+                return await this.convertListItem(child, depth + 1);
+            }
+            // For other elements, convert normally
+            return await this.convertElement(child);
+        }) ?? []))
+            .flat()
+            .filter((child) => child !== null);
         if (convertedChildren.length === 0) {
             return undefined;
         }

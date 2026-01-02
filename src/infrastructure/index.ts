@@ -51,6 +51,7 @@ const buildInstances = ({
   const notionConverter = new NotionConverterRepository({
     logger,
     fileUploadService,
+    notionClient,
   });
   const htmlParser = new HtmlParser({ logger });
   const markdownParser = new MarkdownParser({ htmlParser, logger });

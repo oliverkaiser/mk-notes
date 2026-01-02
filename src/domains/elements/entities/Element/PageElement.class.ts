@@ -11,6 +11,7 @@ export type PageElementPropertyValue =
   | number[]
   | boolean
   | boolean[]
+  | Date
   | null
   | undefined;
 

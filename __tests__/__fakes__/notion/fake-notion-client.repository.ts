@@ -22,6 +22,10 @@ export class FakeNotionClientRepository implements NotionClientRepository {
   private databases: Map<string, DatabaseObjectResponse> = new Map();
   private dataSources: Map<string, DataSourceObjectResponse> = new Map();
   private databaseToDataSource: Map<string, string> = new Map();
+  private users: Map<
+    string,
+    { id: string; name: string | null; email?: string; type: 'person' | 'bot' }
+  > = new Map();
 
   /**
    * ------------------------------------------------------------
@@ -42,6 +46,42 @@ export class FakeNotionClientRepository implements NotionClientRepository {
       next_cursor: null,
       has_more: false,
     };
+  }
+
+  /**
+   * ------------------------------------------------------------
+   * USERS METHODS
+   * ------------------------------------------------------------
+   */
+  // eslint-disable-next-line @typescript-eslint/require-await
+  async listUsers(): Promise<
+    Array<{
+      id: string;
+      name: string | null;
+      email?: string;
+      type: 'person' | 'bot';
+    }>
+  > {
+    return Array.from(this.users.values());
+  }
+
+  // eslint-disable-next-line @typescript-eslint/require-await
+  async findUserByNameOrEmail(
+    searchTerm: string
+  ): Promise<{ id: string; name: string | null; email?: string } | null> {
+    const normalizedSearch = searchTerm.toLowerCase().trim();
+    for (const user of this.users.values()) {
+      const nameMatch = user.name?.toLowerCase().trim() === normalizedSearch;
+      const emailMatch = user.email?.toLowerCase().trim() === normalizedSearch;
+      if (nameMatch || emailMatch) {
+        return {
+          id: user.id,
+          name: user.name,
+          email: user.email,
+        };
+      }
+    }
+    return null;
   }
 
   /**
@@ -296,11 +336,24 @@ export class FakeNotionClientRepository implements NotionClientRepository {
     this.databaseToDataSource.set(databaseId, dataSourceId);
   }
 
+  setUser(
+    userId: string,
+    user: {
+      id: string;
+      name: string | null;
+      email?: string;
+      type: 'person' | 'bot';
+    }
+  ): void {
+    this.users.set(userId, user);
+  }
+
   clear(): void {
     this.pages.clear();
     this.blocks.clear();
     this.databases.clear();
     this.dataSources.clear();
     this.databaseToDataSource.clear();
+    this.users.clear();
   }
 }

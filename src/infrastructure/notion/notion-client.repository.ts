@@ -43,6 +43,84 @@ export class NotionClientRepository implements NotionClientRepositoryInterface {
 
   /**
    * ------------------------------------------------------------
+   * USERS METHODS
+   * ------------------------------------------------------------
+   */
+  public async listUsers(): Promise<
+    Array<{
+      id: string;
+      name: string | null;
+      email?: string;
+      type: 'person' | 'bot';
+    }>
+  > {
+    const allUsers: Array<{
+      id: string;
+      name: string | null;
+      email?: string;
+      type: 'person' | 'bot';
+    }> = [];
+    let startCursor: string | undefined = undefined;
+    let hasMore = true;
+
+    while (hasMore) {
+      const response = await this.client.users.list({
+        start_cursor: startCursor,
+      });
+
+      for (const user of response.results) {
+        if (user.type === 'person' && user.person) {
+          allUsers.push({
+            id: user.id,
+            name: user.name,
+            email: user.person.email,
+            type: 'person',
+          });
+        } else if (user.type === 'bot') {
+          allUsers.push({
+            id: user.id,
+            name: user.name,
+            type: 'bot',
+          });
+        }
+      }
+
+      hasMore = response.has_more;
+      startCursor = response.next_cursor ?? undefined;
+    }
+
+    return allUsers;
+  }
+
+  public async findUserByNameOrEmail(
+    searchTerm: string
+  ): Promise<{ id: string; name: string | null; email?: string } | null> {
+    const users = await this.listUsers();
+    const searchLower = searchTerm.toLowerCase().trim();
+
+    // Try exact match first (case-insensitive)
+    let match = users.find(
+      (user) =>
+        user.name?.toLowerCase() === searchLower ||
+        user.email?.toLowerCase() === searchLower
+    );
+
+    // Try partial match on name
+    if (!match) {
+      match = users.find(
+        (user) =>
+          user.name?.toLowerCase().includes(searchLower) ||
+          user.email?.toLowerCase().includes(searchLower)
+      );
+    }
+
+    return match
+      ? { id: match.id, name: match.name, email: match.email }
+      : null;
+  }
+
+  /**
+   * ------------------------------------------------------------
    * DATABASES METHODS
    * ------------------------------------------------------------
    */
@@ -155,9 +233,31 @@ export class NotionClientRepository implements NotionClientRepositoryInterface {
     archived?: boolean;
     isLocked?: boolean;
   }): Promise<NotionPage> {
+    // eslint-disable-next-line no-console
+    console.debug(`[NotionClient] Updating page ${pageId}`);
+    // eslint-disable-next-line no-console
+    console.debug(
+      `[NotionClient] Properties to update:`,
+      JSON.stringify(properties, null, 2)
+    );
+
+    // Transform properties for update - remove id and type from title property
+    const transformedProperties = properties ? { ...properties } : {};
+    if (
+      transformedProperties.title &&
+      typeof transformedProperties.title === 'object'
+    ) {
+      const titleProp = transformedProperties.title as TitleProperty;
+      // Remove id and type fields for update API
+      transformedProperties.title = {
+        title: titleProp.title,
+      } as TitleProperty;
+    }
+
     const updateBody: UpdatePageParameters = {
       page_id: pageId,
-      properties: {},
+      properties:
+        (transformedProperties as UpdatePageParameters['properties']) ?? {},
       archived,
       is_locked: isLocked,
     };
@@ -166,9 +266,16 @@ export class NotionClientRepository implements NotionClientRepositoryInterface {
       updateBody.icon = icon;
     }
 
-    if (properties?.title) {
-      updateBody.properties!['title'] = properties.title as TitleProperty;
-    }
+    // eslint-disable-next-line no-console
+    console.debug(
+      `[NotionClient] Update body:`,
+      JSON.stringify(updateBody, null, 2)
+    );
+    // eslint-disable-next-line no-console
+    console.debug(
+      `[NotionClient] Properties in update body:`,
+      JSON.stringify(updateBody.properties, null, 2)
+    );
 
     const response = await this.client.pages.update(updateBody);
 

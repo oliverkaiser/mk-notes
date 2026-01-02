@@ -80610,6 +80610,10 @@ class FileConverter {
         if (Array.isArray(value)) {
             return this.getPropertyValueStringArray(value);
         }
+        // Handle Date objects
+        if (value instanceof Date) {
+            return value.toISOString();
+        }
         if (value === null) {
             return 'null';
         }
@@ -80692,9 +80696,11 @@ class NotionConverterRepository {
     logger;
     fileUploadService;
     basePath;
-    constructor({ logger, fileUploadService, }) {
+    notionClient;
+    constructor({ logger, fileUploadService, notionClient, }) {
         this.logger = logger;
         this.fileUploadService = fileUploadService;
+        this.notionClient = notionClient;
     }
     setBasePath(basePath) {
         this.basePath = basePath;
@@ -80812,16 +80818,20 @@ class NotionConverterRepository {
                     },
                 };
             }
+            // If no matching option found, try to create a new option
+            // Notion API allows creating new options by providing only the name (without id)
+            // We use a type assertion to allow omitting the id field
+            this.logger.debug(`Select option "${value}" not found in property "${propertyDefinition.name}". Attempting to create new option. Available options: ${options.map((o) => o.name).join(', ')}.`);
+            return {
+                type: 'select',
+                // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+                select: {
+                    name: value,
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                }, // Type assertion to allow omitting id for new option creation
+            };
         }
-        // If no matching option found, create a new one with the provided value
-        // Notion will create the option if it doesn't exist
-        return {
-            type: 'select',
-            select: {
-                id: '',
-                name: value,
-            },
-        };
+        return null;
     }
     /**
      * Converts a string value to a Notion MultiSelectProperty
@@ -80845,35 +80855,52 @@ class NotionConverterRepository {
                     color: matchingOption.color,
                 };
             }
-            // Create new option if not found
+            // Create new option if not found - omit id to allow Notion to create it
+            this.logger.debug(`Multi-select option "${val}" not found in property "${propertyDefinition.name}". Attempting to create new option.`);
+            // eslint-disable-next-line @typescript-eslint/no-unsafe-return
             return {
-                id: '',
                 name: String(val),
-            };
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            }; // Type assertion to allow omitting id for new option creation
         });
         return {
             type: 'multi_select',
+            // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
             multi_select: multiSelectOptions,
         };
     }
     /**
-     * Converts a string value to a Notion DateProperty
-     * Supports ISO 8601 date strings (YYYY-MM-DD or YYYY-MM-DDTHH:mm:ss)
+     * Converts a string or Date value to a Notion DateProperty
+     * Supports ISO 8601 date strings (YYYY-MM-DD or YYYY-MM-DDTHH:mm:ss) or Date objects
      */
     convertToDateProperty(value) {
-        if (typeof value !== 'string') {
-            throw new Error(`Invalid value type: ${typeof value}`);
+        let date;
+        // Handle both string and Date object inputs
+        if (value instanceof Date) {
+            date = value;
         }
-        // Try to parse the date
-        const date = new Date(value);
-        if (isNaN(date.getTime())) {
-            this.logger.warn(`Cannot convert "${value}" to date property, skipping`);
+        else if (typeof value === 'string') {
+            date = new Date(value);
+        }
+        else {
+            this.logger.warn(`Cannot convert "${String(value)}" to date property - invalid type: ${typeof value}, skipping`);
             return null;
         }
-        // Format as ISO string (Notion expects ISO 8601 format)
+        // Validate the date
+        if (isNaN(date.getTime())) {
+            this.logger.warn(`Cannot convert "${String(value)}" to date property, skipping`);
+            return null;
+        }
+        // Notion API expects date as an object with start (and optionally end) field
+        // Format as ISO string (YYYY-MM-DD or YYYY-MM-DDTHH:mm:ss)
+        const [isoString] = date.toISOString().split('T'); // Get YYYY-MM-DD format
         return {
             type: 'date',
-            date: value, // Pass the original value if it's already in ISO format
+            // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+            date: {
+                start: isoString,
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            }, // Type assertion - DateRequest is typed as string but API expects object
         };
     }
     /**
@@ -80956,12 +80983,55 @@ class NotionConverterRepository {
         };
     }
     /**
+     * Converts a string or array value to a Notion PeopleProperty
+     * Resolves user names/emails to user IDs using the Notion API
+     */
+    async convertToPeopleProperty(value, propertyDefinition) {
+        this.logger.debug(`Converting people property "${propertyDefinition.name}" with value: ${JSON.stringify(value)}`);
+        if (!this.notionClient) {
+            this.logger.warn(`Notion client not available. Cannot resolve people property "${propertyDefinition.name}". Skipping.`);
+            return null;
+        }
+        const values = Array.isArray(value) ? value : [value];
+        this.logger.debug(`Processing ${values.length} people values: ${values.join(', ')}`);
+        const people = [];
+        for (const nameOrEmail of values) {
+            const searchTerm = String(nameOrEmail).trim();
+            if (!searchTerm) {
+                this.logger.debug(`Skipping empty search term`);
+                continue;
+            }
+            this.logger.debug(`Looking up user: "${searchTerm}"`);
+            const user = await this.notionClient.findUserByNameOrEmail(searchTerm);
+            if (user) {
+                people.push({ id: user.id });
+                this.logger.debug(`Resolved user "${searchTerm}" to ID: ${user.id} (${user.name || user.email})`);
+            }
+            else {
+                this.logger.warn(`Could not find user "${searchTerm}" in workspace. Skipping.`);
+            }
+        }
+        if (people.length === 0) {
+            this.logger.warn(`No valid users found for people property "${propertyDefinition.name}". Skipping.`);
+            return null;
+        }
+        this.logger.debug(`Successfully converted people property with ${people.length} users: ${JSON.stringify(people)}`);
+        return {
+            type: 'people',
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-assignment
+            people: people, // Type assertion for Person array
+        };
+    }
+    /**
      * Converts a PageElementProperty to the appropriate Notion property based on the database property definition
      */
-    convertPropertyValue(value, propertyDefinition) {
+    async convertPropertyValue(value, propertyDefinition) {
         if (value instanceof Array) {
             if (propertyDefinition.type === 'multi_select') {
                 return this.convertToMultiSelectProperty(value, propertyDefinition);
+            }
+            if (propertyDefinition.type === 'people') {
+                return await this.convertToPeopleProperty(value, propertyDefinition);
             }
             this.logger.warn(`Unsupported array value for property type "${propertyDefinition.type}"`);
             return null;
@@ -80990,6 +81060,7 @@ class NotionConverterRepository {
             case 'status':
                 return this.convertToStatusProperty(value, propertyDefinition);
             case 'people':
+                return await this.convertToPeopleProperty(value, propertyDefinition);
             case 'files':
             case 'relation':
             case 'formula':
@@ -81010,26 +81081,42 @@ class NotionConverterRepository {
      * @param notionPropertyDefinitions - Array of database property definitions from Notion
      * @returns PageProperties object ready to be used in Notion API calls
      */
-    convertPageElementProperties(properties, notionProperties = []) {
+    async convertPageElementProperties(properties, notionProperties = []) {
+        this.logger.debug(`Converting ${properties?.length || 0} page element properties with ${notionProperties.length} notion property definitions`);
         const result = {};
         // Create a map of property definitions by name for quick lookup
         const definitionMap = new Map();
         for (const property of notionProperties) {
             definitionMap.set(property.name, property.definition);
+            this.logger.debug(`Mapped property: ${property.name} (${property.type})`);
         }
         // Convert each page element property
         for (const property of properties ?? []) {
+            const valueString = typeof property.value === 'string'
+                ? property.value
+                : property.value instanceof Date
+                    ? property.value.toISOString()
+                    : Array.isArray(property.value)
+                        ? `[${property.value.join(', ')}]`
+                        : String(property.value);
+            this.logger.debug(`Processing property: ${property.name} = ${valueString}`);
             const definition = definitionMap.get(property.name);
             if (!definition) {
                 this.logger.warn(`No matching Notion property definition found for "${property.name}", skipping`);
+                this.logger.debug(`Available property names: ${Array.from(definitionMap.keys()).join(', ')}`);
                 continue;
             }
-            const convertedValue = this.convertPropertyValue(property.value, definition);
+            const convertedValue = await this.convertPropertyValue(property.value, definition);
             if (convertedValue !== null) {
                 // Use the original definition name to preserve casing
                 result[definition.name] = convertedValue;
+                this.logger.debug(`Successfully converted property: ${definition.name}`);
+            }
+            else {
+                this.logger.debug(`Failed to convert property: ${property.name}`);
             }
         }
+        this.logger.debug(`Converted ${Object.keys(result).length} properties: ${Object.keys(result).join(', ')}`);
         return result;
     }
     async convertPageElement(element, notionPropertyDefinitions = []) {
@@ -81050,7 +81137,7 @@ class NotionConverterRepository {
             children: [],
             properties: {
                 title,
-                ...this.convertPageElementProperties(element.properties, notionPropertyDefinitions),
+                ...(await this.convertPageElementProperties(element.properties, notionPropertyDefinitions)),
             },
         };
         for (const contentElement of element.content) {
@@ -82030,6 +82117,32 @@ class NotionDestinationRepository {
         notionPage.children = blocks;
         return notionPage;
     }
+    async getAvailablePropertiesFromDatabase(databaseId) {
+        this.logger.debug(`Getting properties from database: ${databaseId}`);
+        const availableProperties = [];
+        const datasourceId = await this.notionClient.getDataSourceIdFromDatabaseId({
+            databaseId,
+        });
+        if (!datasourceId) {
+            this.logger.debug(`No datasource found for database: ${databaseId}`);
+            return availableProperties;
+        }
+        this.logger.debug(`Found datasource: ${datasourceId}`);
+        const datasource = await this.notionClient.getDataSourceById({
+            dataSourceId: datasourceId,
+        });
+        if (!datasource) {
+            this.logger.debug(`Datasource ${datasourceId} not found`);
+            return availableProperties;
+        }
+        availableProperties.push(...Object.entries(datasource.properties).map(([name, property]) => ({
+            name,
+            definition: property,
+            type: property.type,
+        })));
+        this.logger.debug(`Extracted ${availableProperties.length} properties from datasource: ${availableProperties.map((p) => `${p.name} (${p.type})`).join(', ')}`);
+        return availableProperties;
+    }
     async createPage({ parentObjectId, parentObjectType, pageElement, }) {
         if (parentObjectType === 'unknown') {
             throw new Error('Unknown parent object type');
@@ -82046,18 +82159,9 @@ class NotionDestinationRepository {
             if (!datasourceId) {
                 throw new Error('Failed to get Datasource');
             }
-            const datasource = await this.notionClient.getDataSourceById({
-                dataSourceId: datasourceId,
-            });
-            if (!datasource) {
-                throw new Error('Failed to get Datasource');
-            }
             parent = { type: 'data_source_id', data_source_id: datasourceId };
-            availableProperties.push(...Object.entries(datasource.properties).map(([name, property]) => ({
-                name,
-                definition: property,
-                type: property.type,
-            })));
+            const properties = await this.getAvailablePropertiesFromDatabase(parentObjectId);
+            availableProperties.push(...properties);
         }
         const notionPage = await this.notionConverter.convertFromElement(pageElement, availableProperties);
         // First create the page without children
@@ -82087,9 +82191,75 @@ class NotionDestinationRepository {
         }
         return page;
     }
+    async getAvailablePropertiesForPage(pageId) {
+        this.logger.debug(`Getting available properties for page: ${pageId}`);
+        // Get the page to check its parent
+        const page = await this.notionClient.getPage({ pageId });
+        if (!page) {
+            this.logger.debug(`Page ${pageId} not found`);
+            return [];
+        }
+        // Access the raw page response to get parent info
+        const notionClientWithClient = this
+            .notionClient;
+        if (!notionClientWithClient.client) {
+            this.logger.debug(`Notion client not available`);
+            return [];
+        }
+        const pageResponse = await notionClientWithClient.client.pages.retrieve({
+            page_id: pageId,
+        });
+        const parent = 'parent' in pageResponse ? pageResponse.parent : null;
+        this.logger.debug(`Page parent type: ${parent && typeof parent === 'object' && 'type' in parent ? parent.type : 'unknown'}`);
+        // Check if parent is a data source (pages in databases have data_source_id parent)
+        if (parent &&
+            typeof parent === 'object' &&
+            'type' in parent &&
+            parent.type === 'data_source_id' &&
+            'data_source_id' in parent) {
+            const dataSourceId = parent.data_source_id;
+            this.logger.debug(`Page is in data source: ${dataSourceId}`);
+            // Get datasource directly and extract properties
+            const datasource = await this.notionClient.getDataSourceById({
+                dataSourceId: dataSourceId,
+            });
+            if (!datasource) {
+                this.logger.debug(`Datasource ${dataSourceId} not found`);
+                return [];
+            }
+            const availableProperties = Object.entries(datasource.properties).map(([name, property]) => ({
+                name,
+                definition: property,
+                type: property.type,
+            }));
+            this.logger.debug(`Extracted ${availableProperties.length} properties from datasource: ${availableProperties.map((p) => `${p.name} (${p.type})`).join(', ')}`);
+            return availableProperties;
+        }
+        // Check if parent is a database (legacy or direct database parent)
+        if (parent &&
+            typeof parent === 'object' &&
+            'type' in parent &&
+            parent.type === 'database_id' &&
+            'database_id' in parent) {
+            const databaseId = parent.database_id;
+            this.logger.debug(`Page is in database: ${databaseId}`);
+            const properties = await this.getAvailablePropertiesFromDatabase(databaseId);
+            this.logger.debug(`Found ${properties.length} available properties for page`);
+            return properties;
+        }
+        this.logger.debug(`Page is not in a database or data source, no properties available`);
+        return [];
+    }
     async updatePage({ pageId, pageElement, }) {
         const notionPageId = pageId;
-        const notionPage = await this.notionConverter.convertFromElement(pageElement);
+        this.logger.debug(`Updating page: ${notionPageId}`);
+        this.logger.debug(`PageElement has ${pageElement.properties?.length || 0} properties: ${JSON.stringify(pageElement.properties)}`);
+        // Get available properties from the page's parent database
+        const availableProperties = await this.getAvailablePropertiesForPage(notionPageId);
+        this.logger.debug(`Available properties count: ${availableProperties.length}`);
+        const notionPage = await this.notionConverter.convertFromElement(pageElement, availableProperties);
+        this.logger.debug(`Converted properties: ${JSON.stringify(notionPage.properties, null, 2)}`);
+        this.logger.debug(`Properties keys: ${Object.keys(notionPage.properties || {}).join(', ')}`);
         await this.notionClient.updatePage({
             pageId: notionPageId,
             icon: notionPage.icon,
@@ -82175,14 +82345,24 @@ class NotionDestinationRepository {
         }
     }
     async updatePageProperties({ pageId, pageElement, }) {
-        const notionPage = await this.notionConverter.convertFromElement(pageElement);
+        this.logger.debug(`Updating page properties for: ${pageId}`);
+        this.logger.debug(`PageElement has ${pageElement.properties?.length || 0} properties: ${JSON.stringify(pageElement.properties)}`);
+        // Get available properties from the page's parent database
+        const availableProperties = await this.getAvailablePropertiesForPage(pageId);
+        this.logger.debug(`Available properties: ${availableProperties.map((p) => `${p.name} (${p.type})`).join(', ')}`);
+        const notionPage = await this.notionConverter.convertFromElement(pageElement, availableProperties);
+        this.logger.debug(`Converted properties: ${JSON.stringify(notionPage.properties, null, 2)}`);
         // Only update if there are properties to update
         if (notionPage.properties || notionPage.icon) {
+            this.logger.debug(`Updating ${Object.keys(notionPage.properties || {}).length} properties`);
             await this.notionClient.updatePage({
                 pageId,
                 icon: notionPage.icon,
                 properties: notionPage.properties,
             });
+        }
+        else {
+            this.logger.debug(`No properties to update`);
         }
     }
     async setPageLockedStatus({ pageId, lockStatus, }) {
@@ -82253,6 +82433,7 @@ const buildInstances = ({ logger, notionApiKey, }) => {
     const notionConverter = new notion_converter_1.NotionConverterRepository({
         logger,
         fileUploadService,
+        notionClient,
     });
     const htmlParser = new html_1.HtmlParser({ logger });
     const markdownParser = new markdown_1.MarkdownParser({ htmlParser, logger });
@@ -82312,6 +82493,56 @@ class NotionClientRepository {
      */
     async search({ filter, }) {
         return this.client.search({ filter });
+    }
+    /**
+     * ------------------------------------------------------------
+     * USERS METHODS
+     * ------------------------------------------------------------
+     */
+    async listUsers() {
+        const allUsers = [];
+        let startCursor = undefined;
+        let hasMore = true;
+        while (hasMore) {
+            const response = await this.client.users.list({
+                start_cursor: startCursor,
+            });
+            for (const user of response.results) {
+                if (user.type === 'person' && user.person) {
+                    allUsers.push({
+                        id: user.id,
+                        name: user.name,
+                        email: user.person.email,
+                        type: 'person',
+                    });
+                }
+                else if (user.type === 'bot') {
+                    allUsers.push({
+                        id: user.id,
+                        name: user.name,
+                        type: 'bot',
+                    });
+                }
+            }
+            hasMore = response.has_more;
+            startCursor = response.next_cursor ?? undefined;
+        }
+        return allUsers;
+    }
+    async findUserByNameOrEmail(searchTerm) {
+        const users = await this.listUsers();
+        const searchLower = searchTerm.toLowerCase().trim();
+        // Try exact match first (case-insensitive)
+        let match = users.find((user) => user.name?.toLowerCase() === searchLower ||
+            user.email?.toLowerCase() === searchLower);
+        // Try partial match on name
+        if (!match) {
+            match = users.find((user) => user.name?.toLowerCase().includes(searchLower) ||
+                user.email?.toLowerCase().includes(searchLower));
+        }
+        return match
+            ? { id: match.id, name: match.name, email: match.email }
+            : null;
     }
     /**
      * ------------------------------------------------------------
@@ -82378,18 +82609,33 @@ class NotionClientRepository {
         return this.getBlockChildren({ blockId: pageId });
     }
     async updatePage({ pageId, icon, properties, archived, isLocked, }) {
+        // eslint-disable-next-line no-console
+        console.debug(`[NotionClient] Updating page ${pageId}`);
+        // eslint-disable-next-line no-console
+        console.debug(`[NotionClient] Properties to update:`, JSON.stringify(properties, null, 2));
+        // Transform properties for update - remove id and type from title property
+        const transformedProperties = properties ? { ...properties } : {};
+        if (transformedProperties.title &&
+            typeof transformedProperties.title === 'object') {
+            const titleProp = transformedProperties.title;
+            // Remove id and type fields for update API
+            transformedProperties.title = {
+                title: titleProp.title,
+            };
+        }
         const updateBody = {
             page_id: pageId,
-            properties: {},
+            properties: transformedProperties ?? {},
             archived,
             is_locked: isLocked,
         };
         if (icon) {
             updateBody.icon = icon;
         }
-        if (properties?.title) {
-            updateBody.properties['title'] = properties.title;
-        }
+        // eslint-disable-next-line no-console
+        console.debug(`[NotionClient] Update body:`, JSON.stringify(updateBody, null, 2));
+        // eslint-disable-next-line no-console
+        console.debug(`[NotionClient] Properties in update body:`, JSON.stringify(updateBody.properties, null, 2));
         const response = await this.client.pages.update(updateBody);
         return this.toNotionPage({
             page: response,

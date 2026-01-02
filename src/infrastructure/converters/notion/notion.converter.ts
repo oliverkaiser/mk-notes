@@ -45,6 +45,7 @@ import {
   NumberProperty,
   PageProperties,
   ParagraphBlock,
+  PeopleProperty,
   PhoneNumberProperty,
   QuoteBlock,
   RichTextItemRequest,
@@ -82,16 +83,20 @@ export class NotionConverterRepository
   private logger: Logger;
   private fileUploadService?: NotionFileUploadService;
   private basePath?: string;
+  private notionClient?: import('@/domains/notion/repositories/notion-client.repository').NotionClientRepository;
 
   constructor({
     logger,
     fileUploadService,
+    notionClient,
   }: {
     logger: Logger;
     fileUploadService?: NotionFileUploadService;
+    notionClient?: import('@/domains/notion/repositories/notion-client.repository').NotionClientRepository;
   }) {
     this.logger = logger;
     this.fileUploadService = fileUploadService;
+    this.notionClient = notionClient;
   }
 
   setBasePath(basePath: string): void {
@@ -217,7 +222,7 @@ export class NotionConverterRepository
   private convertToSelectProperty(
     value: PageElementPropertyValue,
     propertyDefinition: DatabasePropertyDefinition
-  ): SelectProperty {
+  ): SelectProperty | null {
     if (typeof value !== 'string') {
       throw new Error(`Invalid value type: ${typeof value}`);
     }
@@ -239,17 +244,25 @@ export class NotionConverterRepository
           },
         };
       }
+
+      // If no matching option found, try to create a new option
+      // Notion API allows creating new options by providing only the name (without id)
+      // We use a type assertion to allow omitting the id field
+      this.logger.debug(
+        `Select option "${value}" not found in property "${propertyDefinition.name}". Attempting to create new option. Available options: ${options.map((o) => o.name).join(', ')}.`
+      );
+
+      return {
+        type: 'select',
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+        select: {
+          name: value,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any, // Type assertion to allow omitting id for new option creation
+      };
     }
 
-    // If no matching option found, create a new one with the provided value
-    // Notion will create the option if it doesn't exist
-    return {
-      type: 'select',
-      select: {
-        id: '',
-        name: value,
-      },
-    };
+    return null;
   }
 
   /**
@@ -285,41 +298,64 @@ export class NotionConverterRepository
         };
       }
 
-      // Create new option if not found
+      // Create new option if not found - omit id to allow Notion to create it
+      this.logger.debug(
+        `Multi-select option "${val}" not found in property "${propertyDefinition.name}". Attempting to create new option.`
+      );
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-return
       return {
-        id: '',
         name: String(val),
-      };
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any; // Type assertion to allow omitting id for new option creation
     });
 
     return {
       type: 'multi_select',
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
       multi_select: multiSelectOptions,
     };
   }
 
   /**
-   * Converts a string value to a Notion DateProperty
-   * Supports ISO 8601 date strings (YYYY-MM-DD or YYYY-MM-DDTHH:mm:ss)
+   * Converts a string or Date value to a Notion DateProperty
+   * Supports ISO 8601 date strings (YYYY-MM-DD or YYYY-MM-DDTHH:mm:ss) or Date objects
    */
   private convertToDateProperty(
     value: PageElementPropertyValue
   ): DateProperty | null {
-    if (typeof value !== 'string') {
-      throw new Error(`Invalid value type: ${typeof value}`);
-    }
+    let date: Date;
 
-    // Try to parse the date
-    const date = new Date(value);
-    if (isNaN(date.getTime())) {
-      this.logger.warn(`Cannot convert "${value}" to date property, skipping`);
+    // Handle both string and Date object inputs
+    if (value instanceof Date) {
+      date = value;
+    } else if (typeof value === 'string') {
+      date = new Date(value);
+    } else {
+      this.logger.warn(
+        `Cannot convert "${String(value)}" to date property - invalid type: ${typeof value}, skipping`
+      );
       return null;
     }
 
-    // Format as ISO string (Notion expects ISO 8601 format)
+    // Validate the date
+    if (isNaN(date.getTime())) {
+      this.logger.warn(
+        `Cannot convert "${String(value)}" to date property, skipping`
+      );
+      return null;
+    }
+
+    // Notion API expects date as an object with start (and optionally end) field
+    // Format as ISO string (YYYY-MM-DD or YYYY-MM-DDTHH:mm:ss)
+    const [isoString] = date.toISOString().split('T'); // Get YYYY-MM-DD format
+
     return {
       type: 'date',
-      date: value, // Pass the original value if it's already in ISO format
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+      date: {
+        start: isoString,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any, // Type assertion - DateRequest is typed as string but API expects object
     };
   }
 
@@ -426,15 +462,85 @@ export class NotionConverterRepository
   }
 
   /**
-   * Converts a PageElementProperty to the appropriate Notion property based on the database property definition
+   * Converts a string or array value to a Notion PeopleProperty
+   * Resolves user names/emails to user IDs using the Notion API
    */
-  private convertPropertyValue(
+  private async convertToPeopleProperty(
     value: PageElementPropertyValue,
     propertyDefinition: DatabasePropertyDefinition
-  ): PageProperties[string] | null {
+  ): Promise<PeopleProperty | null> {
+    this.logger.debug(
+      `Converting people property "${propertyDefinition.name}" with value: ${JSON.stringify(value)}`
+    );
+
+    if (!this.notionClient) {
+      this.logger.warn(
+        `Notion client not available. Cannot resolve people property "${propertyDefinition.name}". Skipping.`
+      );
+      return null;
+    }
+
+    const values = Array.isArray(value) ? value : [value];
+    this.logger.debug(
+      `Processing ${values.length} people values: ${values.join(', ')}`
+    );
+
+    const people: Array<{ id: string }> = [];
+
+    for (const nameOrEmail of values) {
+      const searchTerm = String(nameOrEmail).trim();
+      if (!searchTerm) {
+        this.logger.debug(`Skipping empty search term`);
+        continue;
+      }
+
+      this.logger.debug(`Looking up user: "${searchTerm}"`);
+      const user = await this.notionClient.findUserByNameOrEmail(searchTerm);
+
+      if (user) {
+        people.push({ id: user.id });
+        this.logger.debug(
+          `Resolved user "${searchTerm}" to ID: ${user.id} (${user.name || user.email})`
+        );
+      } else {
+        this.logger.warn(
+          `Could not find user "${searchTerm}" in workspace. Skipping.`
+        );
+      }
+    }
+
+    if (people.length === 0) {
+      this.logger.warn(
+        `No valid users found for people property "${propertyDefinition.name}". Skipping.`
+      );
+      return null;
+    }
+
+    this.logger.debug(
+      `Successfully converted people property with ${people.length} users: ${JSON.stringify(people)}`
+    );
+
+    return {
+      type: 'people',
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-assignment
+      people: people as any, // Type assertion for Person array
+    };
+  }
+
+  /**
+   * Converts a PageElementProperty to the appropriate Notion property based on the database property definition
+   */
+
+  private async convertPropertyValue(
+    value: PageElementPropertyValue,
+    propertyDefinition: DatabasePropertyDefinition
+  ): Promise<PageProperties[string] | null> {
     if (value instanceof Array) {
       if (propertyDefinition.type === 'multi_select') {
         return this.convertToMultiSelectProperty(value, propertyDefinition);
+      }
+      if (propertyDefinition.type === 'people') {
+        return await this.convertToPeopleProperty(value, propertyDefinition);
       }
       this.logger.warn(
         `Unsupported array value for property type "${propertyDefinition.type}"`
@@ -467,6 +573,7 @@ export class NotionConverterRepository
       case 'status':
         return this.convertToStatusProperty(value, propertyDefinition);
       case 'people':
+        return await this.convertToPeopleProperty(value, propertyDefinition);
       case 'files':
       case 'relation':
       case 'formula':
@@ -490,40 +597,69 @@ export class NotionConverterRepository
    * @param notionPropertyDefinitions - Array of database property definitions from Notion
    * @returns PageProperties object ready to be used in Notion API calls
    */
-  private convertPageElementProperties(
+  private async convertPageElementProperties(
     properties?: PageElementProperties[],
     notionProperties: DatabaseProperty[] = []
-  ): PageProperties {
+  ): Promise<PageProperties> {
+    this.logger.debug(
+      `Converting ${properties?.length || 0} page element properties with ${notionProperties.length} notion property definitions`
+    );
+
     const result: PageProperties = {};
 
     // Create a map of property definitions by name for quick lookup
     const definitionMap = new Map<string, DatabasePropertyDefinition>();
     for (const property of notionProperties) {
       definitionMap.set(property.name, property.definition);
+      this.logger.debug(`Mapped property: ${property.name} (${property.type})`);
     }
 
     // Convert each page element property
     for (const property of properties ?? []) {
+      const valueString =
+        typeof property.value === 'string'
+          ? property.value
+          : property.value instanceof Date
+            ? property.value.toISOString()
+            : Array.isArray(property.value)
+              ? `[${property.value.join(', ')}]`
+              : String(property.value);
+      this.logger.debug(
+        `Processing property: ${property.name} = ${valueString}`
+      );
+
       const definition = definitionMap.get(property.name);
 
       if (!definition) {
         this.logger.warn(
           `No matching Notion property definition found for "${property.name}", skipping`
         );
+        this.logger.debug(
+          `Available property names: ${Array.from(definitionMap.keys()).join(', ')}`
+        );
         continue;
       }
 
-      const convertedValue = this.convertPropertyValue(
+      const convertedValue = await this.convertPropertyValue(
         property.value,
         definition
       );
 
       if (convertedValue !== null) {
         // Use the original definition name to preserve casing
+
         result[definition.name] = convertedValue;
+        this.logger.debug(
+          `Successfully converted property: ${definition.name}`
+        );
+      } else {
+        this.logger.debug(`Failed to convert property: ${property.name}`);
       }
     }
 
+    this.logger.debug(
+      `Converted ${Object.keys(result).length} properties: ${Object.keys(result).join(', ')}`
+    );
     return result;
   }
 
@@ -549,10 +685,10 @@ export class NotionConverterRepository
       children: [],
       properties: {
         title,
-        ...this.convertPageElementProperties(
+        ...(await this.convertPageElementProperties(
           element.properties,
           notionPropertyDefinitions
-        ),
+        )),
       },
     };
 

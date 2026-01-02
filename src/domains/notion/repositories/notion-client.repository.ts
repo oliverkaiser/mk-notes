@@ -29,6 +29,23 @@ export interface NotionClientRepository {
 
   /**
    * ------------------------------------------------------------
+   * USERS METHODS
+   * ------------------------------------------------------------
+   */
+  listUsers(): Promise<
+    Array<{
+      id: string;
+      name: string | null;
+      email?: string;
+      type: 'person' | 'bot';
+    }>
+  >;
+  findUserByNameOrEmail(
+    searchTerm: string
+  ): Promise<{ id: string; name: string | null; email?: string } | null>;
+
+  /**
+   * ------------------------------------------------------------
    * DATABASES METHODS
    * ------------------------------------------------------------
    */

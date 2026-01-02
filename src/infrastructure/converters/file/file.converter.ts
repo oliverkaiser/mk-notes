@@ -154,6 +154,11 @@ export class FileConverter
       return this.getPropertyValueStringArray(value);
     }
 
+    // Handle Date objects
+    if (value instanceof Date) {
+      return value.toISOString();
+    }
+
     if (value === null) {
       return 'null';
     }

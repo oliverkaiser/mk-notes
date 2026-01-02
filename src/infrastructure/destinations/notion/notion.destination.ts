@@ -184,6 +184,47 @@ export class NotionDestinationRepository
     return notionPage;
   }
 
+  private async getAvailablePropertiesFromDatabase(
+    databaseId: string
+  ): Promise<DatabaseProperty[]> {
+    this.logger.debug(`Getting properties from database: ${databaseId}`);
+
+    const availableProperties: DatabaseProperty[] = [];
+
+    const datasourceId = await this.notionClient.getDataSourceIdFromDatabaseId({
+      databaseId,
+    });
+
+    if (!datasourceId) {
+      this.logger.debug(`No datasource found for database: ${databaseId}`);
+      return availableProperties;
+    }
+
+    this.logger.debug(`Found datasource: ${datasourceId}`);
+
+    const datasource = await this.notionClient.getDataSourceById({
+      dataSourceId: datasourceId,
+    });
+
+    if (!datasource) {
+      this.logger.debug(`Datasource ${datasourceId} not found`);
+      return availableProperties;
+    }
+
+    availableProperties.push(
+      ...Object.entries(datasource.properties).map(([name, property]) => ({
+        name,
+        definition: property,
+        type: property.type,
+      }))
+    );
+
+    this.logger.debug(
+      `Extracted ${availableProperties.length} properties from datasource: ${availableProperties.map((p) => `${p.name} (${p.type})`).join(', ')}`
+    );
+    return availableProperties;
+  }
+
   async createPage({
     parentObjectId,
     parentObjectType,
@@ -214,23 +255,11 @@ export class NotionDestinationRepository
         throw new Error('Failed to get Datasource');
       }
 
-      const datasource = await this.notionClient.getDataSourceById({
-        dataSourceId: datasourceId,
-      });
-
-      if (!datasource) {
-        throw new Error('Failed to get Datasource');
-      }
-
       parent = { type: 'data_source_id', data_source_id: datasourceId };
 
-      availableProperties.push(
-        ...Object.entries(datasource.properties).map(([name, property]) => ({
-          name,
-          definition: property,
-          type: property.type,
-        }))
-      );
+      const properties =
+        await this.getAvailablePropertiesFromDatabase(parentObjectId);
+      availableProperties.push(...properties);
     }
 
     const notionPage = await this.notionConverter.convertFromElement(
@@ -273,6 +302,96 @@ export class NotionDestinationRepository
     return page;
   }
 
+  private async getAvailablePropertiesForPage(
+    pageId: string
+  ): Promise<DatabaseProperty[]> {
+    this.logger.debug(`Getting available properties for page: ${pageId}`);
+
+    // Get the page to check its parent
+    const page = await this.notionClient.getPage({ pageId });
+
+    if (!page) {
+      this.logger.debug(`Page ${pageId} not found`);
+      return [];
+    }
+
+    // Access the raw page response to get parent info
+    const notionClientWithClient = this
+      .notionClient as NotionClientRepositoryWithClient;
+    if (!notionClientWithClient.client) {
+      this.logger.debug(`Notion client not available`);
+      return [];
+    }
+
+    const pageResponse = await notionClientWithClient.client.pages.retrieve({
+      page_id: pageId,
+    });
+
+    const parent = 'parent' in pageResponse ? pageResponse.parent : null;
+    this.logger.debug(
+      `Page parent type: ${parent && typeof parent === 'object' && 'type' in parent ? (parent as { type: string }).type : 'unknown'}`
+    );
+
+    // Check if parent is a data source (pages in databases have data_source_id parent)
+    if (
+      parent &&
+      typeof parent === 'object' &&
+      'type' in parent &&
+      parent.type === 'data_source_id' &&
+      'data_source_id' in parent
+    ) {
+      const dataSourceId = parent.data_source_id;
+      this.logger.debug(`Page is in data source: ${dataSourceId}`);
+
+      // Get datasource directly and extract properties
+      const datasource = await this.notionClient.getDataSourceById({
+        dataSourceId: dataSourceId,
+      });
+
+      if (!datasource) {
+        this.logger.debug(`Datasource ${dataSourceId} not found`);
+        return [];
+      }
+
+      const availableProperties: DatabaseProperty[] = Object.entries(
+        datasource.properties
+      ).map(([name, property]) => ({
+        name,
+        definition: property,
+        type: property.type,
+      }));
+
+      this.logger.debug(
+        `Extracted ${availableProperties.length} properties from datasource: ${availableProperties.map((p) => `${p.name} (${p.type})`).join(', ')}`
+      );
+      return availableProperties;
+    }
+
+    // Check if parent is a database (legacy or direct database parent)
+    if (
+      parent &&
+      typeof parent === 'object' &&
+      'type' in parent &&
+      parent.type === 'database_id' &&
+      'database_id' in parent
+    ) {
+      const databaseId = parent.database_id;
+      this.logger.debug(`Page is in database: ${databaseId}`);
+
+      const properties =
+        await this.getAvailablePropertiesFromDatabase(databaseId);
+      this.logger.debug(
+        `Found ${properties.length} available properties for page`
+      );
+      return properties;
+    }
+
+    this.logger.debug(
+      `Page is not in a database or data source, no properties available`
+    );
+    return [];
+  }
+
   async updatePage({
     pageId,
     pageElement,
@@ -282,8 +401,30 @@ export class NotionDestinationRepository
   }): Promise<NotionPage> {
     const notionPageId = pageId;
 
-    const notionPage =
-      await this.notionConverter.convertFromElement(pageElement);
+    this.logger.debug(`Updating page: ${notionPageId}`);
+    this.logger.debug(
+      `PageElement has ${pageElement.properties?.length || 0} properties: ${JSON.stringify(pageElement.properties)}`
+    );
+
+    // Get available properties from the page's parent database
+    const availableProperties =
+      await this.getAvailablePropertiesForPage(notionPageId);
+
+    this.logger.debug(
+      `Available properties count: ${availableProperties.length}`
+    );
+
+    const notionPage = await this.notionConverter.convertFromElement(
+      pageElement,
+      availableProperties
+    );
+
+    this.logger.debug(
+      `Converted properties: ${JSON.stringify(notionPage.properties, null, 2)}`
+    );
+    this.logger.debug(
+      `Properties keys: ${Object.keys(notionPage.properties || {}).join(', ')}`
+    );
 
     await this.notionClient.updatePage({
       pageId: notionPageId,
@@ -417,16 +558,40 @@ export class NotionDestinationRepository
     pageId: string;
     pageElement: PageElement;
   }): Promise<void> {
-    const notionPage =
-      await this.notionConverter.convertFromElement(pageElement);
+    this.logger.debug(`Updating page properties for: ${pageId}`);
+    this.logger.debug(
+      `PageElement has ${pageElement.properties?.length || 0} properties: ${JSON.stringify(pageElement.properties)}`
+    );
+
+    // Get available properties from the page's parent database
+    const availableProperties =
+      await this.getAvailablePropertiesForPage(pageId);
+
+    this.logger.debug(
+      `Available properties: ${availableProperties.map((p) => `${p.name} (${p.type})`).join(', ')}`
+    );
+
+    const notionPage = await this.notionConverter.convertFromElement(
+      pageElement,
+      availableProperties
+    );
+
+    this.logger.debug(
+      `Converted properties: ${JSON.stringify(notionPage.properties, null, 2)}`
+    );
 
     // Only update if there are properties to update
     if (notionPage.properties || notionPage.icon) {
+      this.logger.debug(
+        `Updating ${Object.keys(notionPage.properties || {}).length} properties`
+      );
       await this.notionClient.updatePage({
         pageId,
         icon: notionPage.icon,
         properties: notionPage.properties,
       });
+    } else {
+      this.logger.debug(`No properties to update`);
     }
   }
 

@@ -80377,9 +80377,27 @@ class SynchronizeMarkdownToNotion {
             forceNew,
         });
         if (pageElement.id !== undefined) {
-            const existingPage = await this.destinationRepository.getPage({
-                pageId: pageElement.id,
-            });
+            let existingPage = null;
+            try {
+                existingPage = await this.destinationRepository.getPage({
+                    pageId: pageElement.id,
+                });
+            }
+            catch (error) {
+                // If getPage throws a 404 error, the page doesn't exist
+                // Check if it's an APIResponseError with status 404
+                if (error &&
+                    typeof error === 'object' &&
+                    'status' in error &&
+                    error.status === 404) {
+                    this.logger.warn(`Page ID ${pageElement.id} found in frontmatter but page doesn't exist in Notion. Creating new page for file: ${node.filepath}`);
+                    existingPage = null;
+                }
+                else {
+                    // Re-throw other errors
+                    throw error;
+                }
+            }
             if (existingPage) {
                 // If clean sync is enabled, delete all existing blocks before updating
                 if (cleanSync) {
@@ -80402,6 +80420,11 @@ class SynchronizeMarkdownToNotion {
                     page: pageElement,
                     treeNodeId: node.id,
                 };
+            }
+            else {
+                // Page ID exists in frontmatter but page doesn't exist in Notion
+                // Clear the ID so we create a new page
+                pageElement.id = undefined;
             }
         }
         let result;
@@ -80494,12 +80517,41 @@ class SynchronizeMarkdownToNotion {
             forceNew,
         });
         if (pageElement.id !== undefined) {
-            await this.destinationRepository.updatePage({
-                pageId: pageElement.id,
-                pageElement,
-            });
+            let existingPage = null;
+            try {
+                existingPage = await this.destinationRepository.getPage({
+                    pageId: pageElement.id,
+                });
+            }
+            catch (error) {
+                // If getPage throws a 404 error, the page doesn't exist
+                // Check if it's an APIResponseError with status 404
+                if (error &&
+                    typeof error === 'object' &&
+                    'status' in error &&
+                    error.status === 404) {
+                    this.logger.warn(`Page ID ${pageElement.id} found in frontmatter but page doesn't exist in Notion. Creating new page for file: ${filePath}`);
+                    existingPage = null;
+                }
+                else {
+                    // Re-throw other errors
+                    throw error;
+                }
+            }
+            if (existingPage) {
+                await this.destinationRepository.updatePage({
+                    pageId: pageElement.id,
+                    pageElement,
+                });
+            }
+            else {
+                // Page ID exists in frontmatter but page doesn't exist in Notion
+                // Clear the ID so we create a new page
+                pageElement.id = undefined;
+            }
         }
-        else {
+        // If pageElement.id is undefined (either from forceNew, or page doesn't exist), create a new page
+        if (pageElement.id === undefined) {
             // Add standard elements at the beginning (in reverse order)
             pageElement.addElementToBeginning(new elements_1.TableOfContentsElement());
             pageElement.addElementToBeginning(new elements_1.DividerElement());

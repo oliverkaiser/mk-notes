@@ -66,4 +66,15 @@ export interface DestinationRepository<T extends Page> {
     pageId: string;
   }) => Promise<PageLockedStatus>;
   getObjectType: ({ id }: { id: string }) => Promise<ObjectType>;
+  queryDatabase: ({
+    databaseId,
+    filter,
+  }: {
+    databaseId: string;
+    filter?: {
+      property: string;
+      value: string;
+    };
+  }) => Promise<Array<{ pageId: string }>>;
+  deletePage: ({ pageId }: { pageId: string }) => Promise<void>;
 }

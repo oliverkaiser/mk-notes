@@ -182,6 +182,72 @@ export class SynchronizeMarkdownToNotion<T, U extends Page> {
   }
 
   /**
+   * Deletes a Notion page by file path by querying the database for pages
+   * with matching md-file property
+   */
+  async deletePageByFilePath({
+    filePath,
+    parentObjectId,
+  }: {
+    filePath: string;
+    parentObjectId: string;
+  }): Promise<void> {
+    // Check if parent is a database
+    const parentObjectType = await this.destinationRepository.getObjectType({
+      id: parentObjectId,
+    });
+
+    if (parentObjectType !== 'database') {
+      this.logger.warn(
+        `Cannot delete page by file path: parent object is not a database (type: ${parentObjectType})`
+      );
+      return;
+    }
+
+    this.logger.info(
+      `Querying database ${parentObjectId} for pages with md-file property matching: ${filePath}`
+    );
+
+    // Query database for pages with matching md-file property
+    const matchingPages = await this.destinationRepository.queryDatabase({
+      databaseId: parentObjectId,
+      filter: {
+        property: 'md-file',
+        value: filePath,
+      },
+    });
+
+    if (matchingPages.length === 0) {
+      this.logger.warn(
+        `No pages found in database with md-file property matching: ${filePath}`
+      );
+      return;
+    }
+
+    if (matchingPages.length > 1) {
+      this.logger.warn(
+        `Multiple pages (${matchingPages.length}) found with md-file property matching: ${filePath}. Deleting all of them.`
+      );
+    }
+
+    // Delete all matching pages
+    for (const page of matchingPages) {
+      try {
+        await this.destinationRepository.deletePage({ pageId: page.pageId });
+        this.logger.info(
+          `Successfully deleted page ${page.pageId} for file: ${filePath}`
+        );
+      } catch (error) {
+        this.logger.error(
+          `Failed to delete page ${page.pageId} for file: ${filePath}`,
+          { error }
+        );
+        throw error;
+      }
+    }
+  }
+
+  /**
    * -------------
    * PRIVATE METHODS
    * -------------

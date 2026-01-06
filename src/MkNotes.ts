@@ -109,4 +109,33 @@ export class MkNotes {
       flatten,
     });
   }
+
+  /**
+   * Delete a Notion page by file path
+   */
+  async deletePageByFilePath({
+    filePath,
+    parentNotionPageId,
+  }: {
+    filePath: string;
+    parentNotionPageId: string;
+  }): Promise<void> {
+    const synchronizeMarkdownToNotion = new SynchronizeMarkdownToNotion({
+      logger: this.logger,
+      destinationRepository: this.infrastructureInstances.notionDestination,
+      elementConverter: this.infrastructureInstances.fileConverter,
+      sourceRepository: this.infrastructureInstances.fileSystemSource,
+      eventLogger: this.infrastructureInstances.eventLogger,
+    });
+
+    const notionObjectId =
+      this.infrastructureInstances.notionDestination.getObjectIdFromObjectUrl({
+        objectUrl: parentNotionPageId,
+      });
+
+    await synchronizeMarkdownToNotion.deletePageByFilePath({
+      filePath,
+      parentObjectId: notionObjectId,
+    });
+  }
 }

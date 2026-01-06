@@ -156,4 +156,23 @@ export class FakeDestinationRepository<T extends Page>
     // no-op in fake repository for testing
     return Promise.resolve();
   }
+
+  async queryDatabase({
+    databaseId,
+    filter,
+  }: {
+    databaseId: string;
+    filter?: {
+      property: string;
+      value: string;
+    };
+  }): Promise<Array<{ pageId: string }>> {
+    // no-op in fake repository for testing
+    return Promise.resolve([]);
+  }
+
+  async deletePage({ pageId }: { pageId: string }): Promise<void> {
+    // no-op in fake repository for testing
+    return Promise.resolve();
+  }
 }

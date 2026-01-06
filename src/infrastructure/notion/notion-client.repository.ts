@@ -140,6 +140,60 @@ export class NotionClientRepository implements NotionClientRepositoryInterface {
     return response as DatabaseObjectResponse;
   }
 
+  public async queryDatabase({
+    databaseId,
+    filter,
+  }: {
+    databaseId: string;
+    filter?: {
+      property: string;
+      value: string;
+    };
+  }): Promise<Array<{ pageId: string }>> {
+    // Get the data source ID from the database ID
+    const datasourceId = await this.getDataSourceIdFromDatabaseId({
+      databaseId,
+    });
+
+    if (!datasourceId) {
+      throw new Error('Failed to get datasource ID from database');
+    }
+
+    const allPages: Array<{ pageId: string }> = [];
+    let startCursor: string | undefined = undefined;
+    let hasMore = true;
+
+    // Build the filter for Notion API
+    const notionFilter = filter
+      ? {
+          property: filter.property,
+          rich_text: {
+            equals: filter.value,
+          },
+        }
+      : undefined;
+
+    while (hasMore) {
+      const response = await this.client.dataSources.query({
+        data_source_id: datasourceId,
+        filter: notionFilter,
+        start_cursor: startCursor,
+      });
+
+      // Extract page IDs from results
+      for (const page of response.results) {
+        if ('id' in page && page.id) {
+          allPages.push({ pageId: page.id });
+        }
+      }
+
+      hasMore = response.has_more;
+      startCursor = response.next_cursor ?? undefined;
+    }
+
+    return allPages;
+  }
+
   /**
    * ------------------------------------------------------------
    * DATA SOURCES METHODS

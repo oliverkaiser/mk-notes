@@ -55,6 +55,17 @@ export interface NotionClientRepository {
     databaseId: string;
   }): Promise<DatabaseObjectResponse | null>;
 
+  queryDatabase({
+    databaseId,
+    filter,
+  }: {
+    databaseId: string;
+    filter?: {
+      property: string;
+      value: string;
+    };
+  }): Promise<Array<{ pageId: string }>>;
+
   /**
    * ------------------------------------------------------------
    * DATA SOURCES METHODS

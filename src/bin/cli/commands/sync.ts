@@ -12,7 +12,7 @@ const command = new Command();
 command.name(COMMAND_NAME);
 command.description(COMMAND_DESCRIPTION);
 
-command.requiredOption(
+command.option(
   '-i, --input <path>',
   'Path of the markdown file or directory to synchronize'
 );
@@ -40,9 +40,14 @@ command.option('-f, --force-new', 'Force a new page to be created');
 
 command.option('--flat', 'Flatten the result page tree');
 
+command.option(
+  '--delete-file <filePath>',
+  'Delete a Notion page by file path (queries database for pages with matching md-file property)'
+);
+
 command.option('-v, --verbosity <verbosity>', 'Verbosity level', 'error');
 interface SyncOptions {
-  input: string;
+  input?: string;
   destination: string;
   notionApiKey: string;
   clean?: boolean;
@@ -51,6 +56,7 @@ interface SyncOptions {
   verbosity?: string;
   forceNew?: boolean;
   flat?: boolean;
+  deleteFile?: string;
 }
 
 command.action(async (opts: SyncOptions) => {
@@ -64,6 +70,7 @@ command.action(async (opts: SyncOptions) => {
     forceNew = false,
     verbosity = 'error',
     flat = false,
+    deleteFile,
   } = opts;
 
   if (!isValidVerbosity(verbosity)) {
@@ -74,6 +81,24 @@ command.action(async (opts: SyncOptions) => {
     notionApiKey,
     LOG_LEVEL: verbosity,
   });
+
+  // Handle file deletion
+  if (deleteFile) {
+    // eslint-disable-next-line no-console
+    console.log(`Deleting Notion page for file: ${deleteFile}`);
+    await mkNotes.deletePageByFilePath({
+      filePath: deleteFile,
+      parentNotionPageId: notionParentPageUrl,
+    });
+    // eslint-disable-next-line no-console
+    console.log(`Successfully deleted Notion page for file: ${deleteFile}`);
+    return;
+  }
+
+  // Normal sync flow - input is required
+  if (!inputPath) {
+    throw new Error('Input path is required for sync (use --input or -i)');
+  }
 
   await mkNotes.synchronizeMarkdownToNotionFromFileSystem({
     inputPath: inputPath,

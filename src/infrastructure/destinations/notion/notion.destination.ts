@@ -647,4 +647,24 @@ export class NotionDestinationRepository
       }
     }
   }
+
+  async queryDatabase({
+    databaseId,
+    filter,
+  }: {
+    databaseId: string;
+    filter?: {
+      property: string;
+      value: string;
+    };
+  }): Promise<Array<{ pageId: string }>> {
+    return this.notionClient.queryDatabase({
+      databaseId,
+      filter,
+    });
+  }
+
+  async deletePage({ pageId }: { pageId: string }): Promise<void> {
+    await this.notionClient.deletePage({ pageId });
+  }
 }

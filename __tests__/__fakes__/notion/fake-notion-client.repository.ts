@@ -121,6 +121,49 @@ export class FakeNotionClientRepository implements NotionClientRepository {
     return this.databaseToDataSource.get(databaseId) ?? null;
   }
 
+  // eslint-disable-next-line @typescript-eslint/require-await
+  async queryDatabase({
+    databaseId,
+    filter,
+  }: {
+    databaseId: string;
+    filter?: {
+      property: string;
+      value: string;
+    };
+  }): Promise<Array<{ pageId: string }>> {
+    // In the fake implementation, we'll search through pages and match by property
+    // This is a simplified version for testing
+    const results: Array<{ pageId: string }> = [];
+
+    if (filter) {
+      for (const [pageId, page] of this.pages.entries()) {
+        // Check if page has the matching property value
+        if (page.properties && page.properties[filter.property]) {
+          const prop = page.properties[filter.property];
+          // For rich_text properties, check if any text matches
+          if (
+            'rich_text' in prop &&
+            Array.isArray(prop.rich_text) &&
+            prop.rich_text.some(
+              (text: { plain_text?: string }) =>
+                text.plain_text === filter.value
+            )
+          ) {
+            results.push({ pageId });
+          }
+        }
+      }
+    } else {
+      // If no filter, return all pages
+      for (const pageId of this.pages.keys()) {
+        results.push({ pageId });
+      }
+    }
+
+    return results;
+  }
+
   /**
    * ------------------------------------------------------------
    * PAGES METHODS

@@ -78621,6 +78621,25 @@ class MkNotes {
             flatten,
         });
     }
+    /**
+     * Delete a Notion page by file path
+     */
+    async deletePageByFilePath({ filePath, parentNotionPageId, }) {
+        const synchronizeMarkdownToNotion = new domains_1.SynchronizeMarkdownToNotion({
+            logger: this.logger,
+            destinationRepository: this.infrastructureInstances.notionDestination,
+            elementConverter: this.infrastructureInstances.fileConverter,
+            sourceRepository: this.infrastructureInstances.fileSystemSource,
+            eventLogger: this.infrastructureInstances.eventLogger,
+        });
+        const notionObjectId = this.infrastructureInstances.notionDestination.getObjectIdFromObjectUrl({
+            objectUrl: parentNotionPageId,
+        });
+        await synchronizeMarkdownToNotion.deletePageByFilePath({
+            filePath,
+            parentObjectId: notionObjectId,
+        });
+    }
 }
 exports.MkNotes = MkNotes;
 
@@ -80155,6 +80174,47 @@ class SynchronizeMarkdownToNotion {
                 });
             }
             throw error;
+        }
+    }
+    /**
+     * Deletes a Notion page by file path by querying the database for pages
+     * with matching md-file property
+     */
+    async deletePageByFilePath({ filePath, parentObjectId, }) {
+        // Check if parent is a database
+        const parentObjectType = await this.destinationRepository.getObjectType({
+            id: parentObjectId,
+        });
+        if (parentObjectType !== 'database') {
+            this.logger.warn(`Cannot delete page by file path: parent object is not a database (type: ${parentObjectType})`);
+            return;
+        }
+        this.logger.info(`Querying database ${parentObjectId} for pages with md-file property matching: ${filePath}`);
+        // Query database for pages with matching md-file property
+        const matchingPages = await this.destinationRepository.queryDatabase({
+            databaseId: parentObjectId,
+            filter: {
+                property: 'md-file',
+                value: filePath,
+            },
+        });
+        if (matchingPages.length === 0) {
+            this.logger.warn(`No pages found in database with md-file property matching: ${filePath}`);
+            return;
+        }
+        if (matchingPages.length > 1) {
+            this.logger.warn(`Multiple pages (${matchingPages.length}) found with md-file property matching: ${filePath}. Deleting all of them.`);
+        }
+        // Delete all matching pages
+        for (const page of matchingPages) {
+            try {
+                await this.destinationRepository.deletePage({ pageId: page.pageId });
+                this.logger.info(`Successfully deleted page ${page.pageId} for file: ${filePath}`);
+            }
+            catch (error) {
+                this.logger.error(`Failed to delete page ${page.pageId} for file: ${filePath}`, { error });
+                throw error;
+            }
         }
     }
     /**
@@ -82398,6 +82458,15 @@ class NotionDestinationRepository {
             }
         }
     }
+    async queryDatabase({ databaseId, filter, }) {
+        return this.notionClient.queryDatabase({
+            databaseId,
+            filter,
+        });
+    }
+    async deletePage({ pageId }) {
+        await this.notionClient.deletePage({ pageId });
+    }
 }
 exports.NotionDestinationRepository = NotionDestinationRepository;
 
@@ -82557,6 +82626,43 @@ class NotionClientRepository {
             return null;
         }
         return response;
+    }
+    async queryDatabase({ databaseId, filter, }) {
+        // Get the data source ID from the database ID
+        const datasourceId = await this.getDataSourceIdFromDatabaseId({
+            databaseId,
+        });
+        if (!datasourceId) {
+            throw new Error('Failed to get datasource ID from database');
+        }
+        const allPages = [];
+        let startCursor = undefined;
+        let hasMore = true;
+        // Build the filter for Notion API
+        const notionFilter = filter
+            ? {
+                property: filter.property,
+                rich_text: {
+                    equals: filter.value,
+                },
+            }
+            : undefined;
+        while (hasMore) {
+            const response = await this.client.dataSources.query({
+                data_source_id: datasourceId,
+                filter: notionFilter,
+                start_cursor: startCursor,
+            });
+            // Extract page IDs from results
+            for (const page of response.results) {
+                if ('id' in page && page.id) {
+                    allPages.push({ pageId: page.id });
+                }
+            }
+            hasMore = response.has_more;
+            startCursor = response.next_cursor ?? undefined;
+        }
+        return allPages;
     }
     /**
      * ------------------------------------------------------------

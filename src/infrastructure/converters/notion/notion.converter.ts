@@ -848,6 +848,60 @@ export class NotionConverterRepository
     };
   }
 
+  /**
+   * Serializes a ListItemElement (and its children) to indented markdown format.
+   * Used when list nesting exceeds Notion's API limit.
+   */
+  private serializeListItemToMarkdown(
+    element: ListItemElement,
+    indentLevel: number = 0
+  ): string {
+    const indent = '  '.repeat(indentLevel);
+    const prefix = element.listType === 'ordered' ? '1. ' : '- ';
+
+    // Get text content from the list item
+    const textContent = element.text.map((el) => el.toContentString()).join('');
+
+    let result = `${indent}${prefix}${textContent}`;
+
+    // Recursively serialize children with increased indentation
+    if (element.children && element.children.length > 0) {
+      for (const child of element.children) {
+        if (child.type === ElementType.ListItem) {
+          result +=
+            '\n' +
+            this.serializeListItemToMarkdown(
+              child as ListItemElement,
+              indentLevel + 1
+            );
+        } else {
+          // For non-list items, use toContentString with indentation
+          const childContent = child.toContentString();
+          result += '\n' + indent + '  ' + childContent;
+        }
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * Serializes multiple elements to markdown format for overflow content.
+   */
+  private serializeElementsToMarkdown(elements: Element[]): string {
+    return elements
+      .map((element) => {
+        if (element.type === ElementType.ListItem) {
+          return this.serializeListItemToMarkdown(
+            element as ListItemElement,
+            0
+          );
+        }
+        return element.toContentString();
+      })
+      .join('\n');
+  }
+
   private async convertListItem(
     element: ListItemElement,
     depth: number = 0
@@ -866,12 +920,22 @@ export class NotionConverterRepository
     element: ListItemElement,
     depth: number = 0
   ): Promise<BulletedListItemBlock> {
+    // Notion API supports maximum 3 levels of nesting (depth 0, 1, 2)
+    // At depth 2 (MAX_NESTING_DEPTH), list items cannot have children
+    const MAX_NESTING_DEPTH = 2;
+
+    // At max depth, don't include children - they'll be handled as overflow
+    const children =
+      depth >= MAX_NESTING_DEPTH
+        ? undefined
+        : await this.convertListItemChildren(element.children, depth);
+
     return {
       type: 'bulleted_list_item',
       object: 'block',
       bulleted_list_item: {
         rich_text: this.convertRichText(element.text),
-        children: await this.convertListItemChildren(element.children, depth),
+        children,
       },
     };
   }
@@ -880,12 +944,22 @@ export class NotionConverterRepository
     element: ListItemElement,
     depth: number = 0
   ): Promise<NumberedListItemBlock> {
+    // Notion API supports maximum 3 levels of nesting (depth 0, 1, 2)
+    // At depth 2 (MAX_NESTING_DEPTH), list items cannot have children
+    const MAX_NESTING_DEPTH = 2;
+
+    // At max depth, don't include children - they'll be handled as overflow
+    const children =
+      depth >= MAX_NESTING_DEPTH
+        ? undefined
+        : await this.convertListItemChildren(element.children, depth);
+
     return {
       type: 'numbered_list_item',
       object: 'block',
       numbered_list_item: {
         rich_text: this.convertRichText(element.text),
-        children: await this.convertListItemChildren(element.children, depth),
+        children,
       },
     };
   }
@@ -895,64 +969,56 @@ export class NotionConverterRepository
     depth: number = 0
   ): Promise<BlockObjectRequestWithoutChildren[] | undefined> {
     // Notion API supports maximum 3 levels of nesting (depth 0, 1, 2)
-    // When we reach depth 2, convert nested list items to paragraphs instead
     const MAX_NESTING_DEPTH = 2;
 
     const convertedChildren = (
       await Promise.all(
         children?.map(async (child) => {
-          // If we're at max depth and the child is a list item, convert it to a paragraph
-          if (
-            depth >= MAX_NESTING_DEPTH &&
-            child.type === ElementType.ListItem
-          ) {
+          // For list items, check if we need to handle overflow
+          if (child.type === ElementType.ListItem) {
             const listItem = child as ListItemElement;
-            const listPrefix = listItem.listType === 'ordered' ? '• ' : '• ';
-            const textContent = this.convertRichText(listItem.text);
+            const nextDepth = depth + 1;
 
-            // Prepend the list prefix to the first text element if available
-            if (textContent.length > 0 && textContent[0].type === 'text') {
-              textContent[0].text.content =
-                listPrefix + textContent[0].text.content;
-            } else if (textContent.length === 0) {
-              textContent.push({
-                type: 'text',
-                text: { content: listPrefix },
-              });
-            }
-
-            // Convert the list item to a paragraph
-            const paragraph: BlockObjectRequestWithoutChildren = {
-              type: 'paragraph',
-              object: 'block',
-              paragraph: {
-                rich_text: textContent,
-                color: 'default',
-              },
-            };
-
-            // If the list item has children, convert them to paragraphs as well
-            if (listItem.children && listItem.children.length > 0) {
-              const nestedParagraphs = await this.convertListItemChildren(
-                listItem.children,
-                depth + 1
+            // If the next depth would be at max (depth 2), and this list item has children,
+            // those children would be at depth 3 which is not allowed.
+            // Convert the list item normally, then serialize its children to a code block.
+            if (
+              nextDepth >= MAX_NESTING_DEPTH &&
+              listItem.children &&
+              listItem.children.length > 0
+            ) {
+              // Convert the list item itself (without children - handled in convertBulletedListItem/convertNumberedListItem)
+              const convertedListItem = await this.convertListItem(
+                listItem,
+                nextDepth
               );
 
-              // Return both the paragraph and its nested children
-              if (nestedParagraphs && nestedParagraphs.length > 0) {
-                return [paragraph, ...nestedParagraphs];
-              }
+              // Serialize the overflow children to markdown
+              const markdownContent = this.serializeElementsToMarkdown(
+                listItem.children
+              );
+
+              // Create a code block with the markdown content
+              const codeBlock: BlockObjectRequestWithoutChildren = {
+                type: 'code',
+                object: 'block',
+                code: {
+                  rich_text: [
+                    {
+                      type: 'text',
+                      text: { content: markdownContent },
+                    },
+                  ],
+                  language: 'markdown',
+                },
+              };
+
+              // Return both the list item and the code block as siblings
+              return [convertedListItem, codeBlock];
             }
 
-            return paragraph;
-          }
-
-          // For list items, pass the incremented depth
-          if (child.type === ElementType.ListItem) {
-            return await this.convertListItem(
-              child as ListItemElement,
-              depth + 1
-            );
+            // Normal case: convert list item with incremented depth
+            return await this.convertListItem(listItem, nextDepth);
           }
 
           // For other elements, convert normally

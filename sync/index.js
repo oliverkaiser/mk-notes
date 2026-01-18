@@ -79310,6 +79310,8 @@ var TextElementStyle;
 class TextElement extends Element_class_1.Element {
     text;
     level;
+    isToggleable = false;
+    children;
     styles = {
         italic: false,
         bold: false,
@@ -79317,10 +79319,12 @@ class TextElement extends Element_class_1.Element {
         underline: false,
         code: false,
     };
-    constructor({ id, text, level = TextElementLevel.Paragraph, styles, }) {
+    constructor({ id, text, level = TextElementLevel.Paragraph, styles, isToggleable = false, children, }) {
         super({ id, type: types_1.ElementType.Text });
         this.text = text;
         this.level = level;
+        this.isToggleable = isToggleable;
+        this.children = children;
         this.styles.bold = styles?.bold || false;
         this.styles.italic = styles?.italic || false;
         this.styles.strikethrough = styles?.strikethrough || false;
@@ -79593,7 +79597,12 @@ class NotionPage {
     createdAt;
     updatedAt;
     isLocked;
-    constructor({ pageId, children, createdAt, icon, updatedAt, properties, isLocked, }) {
+    /**
+     * Map of toggle heading children that need to be appended after the heading is created.
+     * This is needed because Notion API doesn't allow nested children in inline heading children.
+     */
+    toggleHeadingChildren = [];
+    constructor({ pageId, children, createdAt, icon, updatedAt, properties, isLocked, toggleHeadingChildren, }) {
         this.pageId = pageId;
         this.children = children;
         this.createdAt = createdAt;
@@ -79601,6 +79610,7 @@ class NotionPage {
         this.icon = icon;
         this.properties = properties;
         this.isLocked = isLocked;
+        this.toggleHeadingChildren = toggleHeadingChildren ?? [];
     }
     static fromPartialCreatePageBodyParameters(args) {
         return new NotionPage({
@@ -81317,17 +81327,46 @@ class NotionConverterRepository {
                 ...(await this.convertPageElementProperties(element.properties, notionPropertyDefinitions)),
             },
         };
+        const toggleHeadingChildren = [];
         for (const contentElement of element.content) {
-            const convertedElement = await this.convertElement(contentElement);
-            if (convertedElement) {
-                result.children?.push(convertedElement);
+            // Handle toggleable text elements specially
+            if (contentElement.type === elements_1.ElementType.Text &&
+                contentElement.isToggleable &&
+                contentElement.children?.length) {
+                const textElement = contentElement;
+                const currentIndex = result.children?.length ?? 0;
+                // Convert the heading WITHOUT inline children
+                const headingBlock = this.convertTextWithoutChildren(textElement);
+                if (headingBlock) {
+                    result.children?.push(headingBlock);
+                }
+                // Convert children separately and store them for later
+                const children = [];
+                for (const child of textElement.children ?? []) {
+                    const converted = await this.convertElement(child);
+                    if (converted) {
+                        children.push(converted);
+                    }
+                }
+                if (children.length > 0) {
+                    toggleHeadingChildren.push({
+                        index: currentIndex,
+                        children,
+                    });
+                }
+            }
+            else {
+                const convertedElement = await this.convertElement(contentElement);
+                if (convertedElement) {
+                    result.children?.push(convertedElement);
+                }
             }
         }
         const icon = element.getIcon();
         if (icon) {
             result.icon = { type: 'emoji', emoji: icon };
         }
-        return result;
+        return { pageParams: result, toggleHeadingChildren };
     }
     async convertElement(element) {
         switch (element.type) {
@@ -81365,10 +81404,16 @@ class NotionConverterRepository {
         }
     }
     async convertFromElement(element, availableProperties = []) {
-        const notionPageInput = await this.convertPageElement(element, availableProperties);
-        return NotionPage_1.NotionPage.fromPartialCreatePageBodyParameters(notionPageInput);
+        const { pageParams, toggleHeadingChildren } = await this.convertPageElement(element, availableProperties);
+        const notionPage = NotionPage_1.NotionPage.fromPartialCreatePageBodyParameters(pageParams);
+        notionPage.toggleHeadingChildren = toggleHeadingChildren;
+        return notionPage;
     }
-    convertText(element) {
+    /**
+     * Convert a text element without inline children.
+     * Used for toggleable headings where children are appended separately.
+     */
+    convertTextWithoutChildren(element) {
         switch (element.level) {
             case elements_1.TextElementLevel.Heading1:
                 return {
@@ -81377,7 +81422,7 @@ class NotionConverterRepository {
                     heading_1: {
                         rich_text: this.convertRichText(element.text),
                         color: 'default',
-                        is_toggleable: false, // Set based on your requirements
+                        is_toggleable: element.isToggleable ?? false,
                     },
                 };
             case elements_1.TextElementLevel.Heading2:
@@ -81387,7 +81432,7 @@ class NotionConverterRepository {
                     heading_2: {
                         rich_text: this.convertRichText(element.text),
                         color: 'default',
-                        is_toggleable: false,
+                        is_toggleable: element.isToggleable ?? false,
                     },
                 };
             case elements_1.TextElementLevel.Heading3:
@@ -81397,7 +81442,52 @@ class NotionConverterRepository {
                     heading_3: {
                         rich_text: this.convertRichText(element.text),
                         color: 'default',
-                        is_toggleable: false,
+                        is_toggleable: element.isToggleable ?? false,
+                    },
+                };
+            default:
+                return {
+                    type: 'paragraph',
+                    object: 'block',
+                    paragraph: {
+                        rich_text: this.convertRichText(element.text),
+                        color: 'default',
+                    },
+                };
+        }
+    }
+    convertText(element) {
+        // For toggleable headings with children, children are handled separately
+        // in convertPageElement and appended after block creation
+        switch (element.level) {
+            case elements_1.TextElementLevel.Heading1:
+                return {
+                    type: 'heading_1',
+                    object: 'block',
+                    heading_1: {
+                        rich_text: this.convertRichText(element.text),
+                        color: 'default',
+                        is_toggleable: element.isToggleable ?? false,
+                    },
+                };
+            case elements_1.TextElementLevel.Heading2:
+                return {
+                    type: 'heading_2',
+                    object: 'block',
+                    heading_2: {
+                        rich_text: this.convertRichText(element.text),
+                        color: 'default',
+                        is_toggleable: element.isToggleable ?? false,
+                    },
+                };
+            case elements_1.TextElementLevel.Heading3:
+                return {
+                    type: 'heading_3',
+                    object: 'block',
+                    heading_3: {
+                        rich_text: this.convertRichText(element.text),
+                        color: 'default',
+                        is_toggleable: element.isToggleable ?? false,
                     },
                 };
             case elements_1.TextElementLevel.Paragraph:
@@ -82406,6 +82496,20 @@ class NotionDestinationRepository {
                 children: children,
             });
             createdPage.children = createdBlocks;
+            // Append children to toggle headings after they're created
+            // This is needed because Notion API doesn't allow nested children inline
+            if (notionPage.toggleHeadingChildren?.length > 0) {
+                for (const { index, children: toggleChildren, } of notionPage.toggleHeadingChildren) {
+                    const createdBlock = createdBlocks[index];
+                    if (createdBlock && toggleChildren.length > 0) {
+                        this.logger.debug(`Appending ${toggleChildren.length} children to toggle heading block ${createdBlock.id}`);
+                        await this.notionClient.appendChildToBlock({
+                            blockId: createdBlock.id,
+                            children: toggleChildren,
+                        });
+                    }
+                }
+            }
         }
         const page = await this.getPage({
             pageId: createdPage.pageId,
@@ -82505,16 +82609,35 @@ class NotionDestinationRepository {
         await this.removeNonPageBlocks({ blocks: existingBlocks });
         if (notionPage.children && notionPage.children?.length > 0) {
             let blocks = notionPage.children;
+            // Track offset if we skip TOC and divider blocks
+            let indexOffset = 0;
             if (blocks.length >= 2 &&
                 blocks[0]?.type === 'table_of_contents' &&
                 blocks[1]?.type === 'divider') {
                 blocks = blocks.slice(2);
+                indexOffset = 2;
             }
-            await this.notionClient.appendChildToBlock({
+            const createdBlocks = await this.notionClient.appendChildToBlock({
                 blockId: notionPageId,
                 children: blocks,
                 afterBlockId: afterBlockId,
             });
+            // Append children to toggle headings after they're created
+            // This is needed because Notion API doesn't allow nested children inline
+            if (notionPage.toggleHeadingChildren?.length > 0) {
+                for (const { index, children } of notionPage.toggleHeadingChildren) {
+                    // Adjust index for the offset (skipped TOC/divider blocks)
+                    const adjustedIndex = index - indexOffset;
+                    const createdBlock = createdBlocks[adjustedIndex];
+                    if (createdBlock && children.length > 0) {
+                        this.logger.debug(`Appending ${children.length} children to toggle heading block ${createdBlock.id}`);
+                        await this.notionClient.appendChildToBlock({
+                            blockId: createdBlock.id,
+                            children: children,
+                        });
+                    }
+                }
+            }
         }
         await this.removeUnusedPageBlocks({ pageElement, blocks: existingBlocks });
         const page = await this.getPage({ pageId: notionPageId });
@@ -83190,6 +83313,31 @@ class MarkdownParser extends elements_1.ParserRepository {
         super({ logger });
         this.htmlParser = htmlParser;
         marked_1.marked.use((0, marked_katex_extension_1.default)({ throwOnError: false, nonStandard: true }));
+        // Add custom extension for [table-of-contents] syntax
+        marked_1.marked.use({
+            extensions: [
+                {
+                    name: 'tableOfContents',
+                    level: 'block',
+                    start(src) {
+                        return src.match(/^\[table-of-contents\]/i)?.index;
+                    },
+                    tokenizer(src) {
+                        const match = /^\[table-of-contents\]/i.exec(src);
+                        if (match) {
+                            return {
+                                type: 'tableOfContents',
+                                raw: match[0],
+                            };
+                        }
+                        return undefined;
+                    },
+                    renderer() {
+                        return '';
+                    },
+                },
+            ],
+        });
     }
     preParseMarkdown(src) {
         const { body } = (0, front_matter_1.default)(src);
@@ -83218,12 +83366,16 @@ class MarkdownParser extends elements_1.ParserRepository {
     }
     /**
      * Parse a heading token
+     * Supports toggle headings with syntax: # > Heading text
      */
     parseHeadingToken(token) {
         const level = this.getTextLevelFromDepth(token.depth);
+        const isToggleable = token.text.startsWith('> ');
+        const text = isToggleable ? token.text.slice(2) : token.text;
         return new elements_1.TextElement({
-            text: token.text,
+            text,
             level,
+            isToggleable,
         });
     }
     parseListToken(token) {
@@ -83489,18 +83641,65 @@ class MarkdownParser extends elements_1.ParserRepository {
             case 'inlineKatex':
                 elements.push(this.parseBlockKatexToken(token));
                 break;
+            case 'tableOfContents':
+                elements.push(new elements_1.TableOfContentsElement());
+                break;
             default:
                 break;
         }
         return elements;
+    }
+    /**
+     * Get the heading depth from a token, or null if not a heading
+     */
+    getHeadingDepth(token) {
+        if (token.type === 'heading') {
+            return token.depth;
+        }
+        return null;
+    }
+    /**
+     * Check if a heading token is a toggle heading (starts with "> ")
+     */
+    isToggleHeading(token) {
+        if (token.type === 'heading') {
+            return token.text.startsWith('> ');
+        }
+        return false;
     }
     parse({ content, filepath, }) {
         // Set the filepath context for use during this synchronous parse operation
         this.parsingFilePath = filepath;
         const tokens = this.preParseMarkdown(content);
         const elements = [];
-        for (const token of tokens) {
-            elements.push(...this.parseToken(token));
+        let i = 0;
+        while (i < tokens.length) {
+            const token = tokens[i];
+            // Handle toggle headings specially - collect children
+            if (this.isToggleHeading(token)) {
+                const headingDepth = this.getHeadingDepth(token);
+                const headingElement = this.parseHeadingToken(token);
+                const children = [];
+                // Collect all following tokens until we hit a heading of same or higher level
+                i++;
+                while (i < tokens.length) {
+                    const nextToken = tokens[i];
+                    const nextDepth = this.getHeadingDepth(nextToken);
+                    // Stop if we hit a heading of same or higher level (lower depth number)
+                    if (nextDepth !== null && nextDepth <= headingDepth) {
+                        break;
+                    }
+                    // Parse and add as child
+                    children.push(...this.parseToken(nextToken));
+                    i++;
+                }
+                headingElement.children = children.length > 0 ? children : undefined;
+                elements.push(headingElement);
+            }
+            else {
+                elements.push(...this.parseToken(token));
+                i++;
+            }
         }
         const result = {
             content: elements,

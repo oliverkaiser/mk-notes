@@ -289,6 +289,27 @@ export class NotionDestinationRepository
       });
 
       createdPage.children = createdBlocks;
+
+      // Append children to toggle headings after they're created
+      // This is needed because Notion API doesn't allow nested children inline
+      if (notionPage.toggleHeadingChildren?.length > 0) {
+        for (const {
+          index,
+          children: toggleChildren,
+        } of notionPage.toggleHeadingChildren) {
+          const createdBlock = createdBlocks[index];
+
+          if (createdBlock && toggleChildren.length > 0) {
+            this.logger.debug(
+              `Appending ${toggleChildren.length} children to toggle heading block ${createdBlock.id}`
+            );
+            await this.notionClient.appendChildToBlock({
+              blockId: createdBlock.id,
+              children: toggleChildren,
+            });
+          }
+        }
+      }
     }
 
     const page = await this.getPage({
@@ -456,19 +477,42 @@ export class NotionDestinationRepository
     if (notionPage.children && notionPage.children?.length > 0) {
       let blocks = notionPage.children as BlockObjectRequest[];
 
+      // Track offset if we skip TOC and divider blocks
+      let indexOffset = 0;
       if (
         blocks.length >= 2 &&
         blocks[0]?.type === 'table_of_contents' &&
         blocks[1]?.type === 'divider'
       ) {
         blocks = blocks.slice(2);
+        indexOffset = 2;
       }
 
-      await this.notionClient.appendChildToBlock({
+      const createdBlocks = await this.notionClient.appendChildToBlock({
         blockId: notionPageId,
         children: blocks,
         afterBlockId: afterBlockId,
       });
+
+      // Append children to toggle headings after they're created
+      // This is needed because Notion API doesn't allow nested children inline
+      if (notionPage.toggleHeadingChildren?.length > 0) {
+        for (const { index, children } of notionPage.toggleHeadingChildren) {
+          // Adjust index for the offset (skipped TOC/divider blocks)
+          const adjustedIndex = index - indexOffset;
+          const createdBlock = createdBlocks[adjustedIndex];
+
+          if (createdBlock && children.length > 0) {
+            this.logger.debug(
+              `Appending ${children.length} children to toggle heading block ${createdBlock.id}`
+            );
+            await this.notionClient.appendChildToBlock({
+              blockId: createdBlock.id,
+              children: children,
+            });
+          }
+        }
+      }
     }
 
     await this.removeUnusedPageBlocks({ pageElement, blocks: existingBlocks });

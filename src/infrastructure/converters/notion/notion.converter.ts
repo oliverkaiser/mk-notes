@@ -23,7 +23,10 @@ import {
   TextElementLevel,
   ToggleElement,
 } from '@/domains/elements';
-import { NotionPage } from '@/domains/notion/entities/NotionPage';
+import {
+  NotionPage,
+  ToggleHeadingChildren,
+} from '@/domains/notion/entities/NotionPage';
 import {
   BlockObjectRequest,
   BlockObjectRequestWithoutChildren,
@@ -666,7 +669,10 @@ export class NotionConverterRepository
   private async convertPageElement(
     element: PageElement,
     notionPropertyDefinitions: DatabaseProperty[] = []
-  ): Promise<PartialCreatePageBodyParameters> {
+  ): Promise<{
+    pageParams: PartialCreatePageBodyParameters;
+    toggleHeadingChildren: ToggleHeadingChildren[];
+  }> {
     const title: TitleProperty = {
       id: 'title',
       type: 'title',
@@ -692,11 +698,44 @@ export class NotionConverterRepository
       },
     };
 
-    for (const contentElement of element.content) {
-      const convertedElement = await this.convertElement(contentElement);
+    const toggleHeadingChildren: ToggleHeadingChildren[] = [];
 
-      if (convertedElement) {
-        result.children?.push(convertedElement);
+    for (const contentElement of element.content) {
+      // Handle toggleable text elements specially
+      if (
+        contentElement.type === ElementType.Text &&
+        (contentElement as TextElement).isToggleable &&
+        (contentElement as TextElement).children?.length
+      ) {
+        const textElement = contentElement as TextElement;
+        const currentIndex = result.children?.length ?? 0;
+
+        // Convert the heading WITHOUT inline children
+        const headingBlock = this.convertTextWithoutChildren(textElement);
+        if (headingBlock) {
+          result.children?.push(headingBlock);
+        }
+
+        // Convert children separately and store them for later
+        const children: BlockObjectRequest[] = [];
+        for (const child of textElement.children ?? []) {
+          const converted = await this.convertElement(child);
+          if (converted) {
+            children.push(converted);
+          }
+        }
+
+        if (children.length > 0) {
+          toggleHeadingChildren.push({
+            index: currentIndex,
+            children,
+          });
+        }
+      } else {
+        const convertedElement = await this.convertElement(contentElement);
+        if (convertedElement) {
+          result.children?.push(convertedElement);
+        }
       }
     }
 
@@ -706,7 +745,7 @@ export class NotionConverterRepository
       result.icon = { type: 'emoji', emoji: icon };
     }
 
-    return result;
+    return { pageParams: result, toggleHeadingChildren };
   }
 
   private async convertElement(
@@ -750,14 +789,23 @@ export class NotionConverterRepository
     element: PageElement,
     availableProperties: DatabaseProperty[] = []
   ): Promise<NotionPage> {
-    const notionPageInput = await this.convertPageElement(
+    const { pageParams, toggleHeadingChildren } = await this.convertPageElement(
       element,
       availableProperties
     );
-    return NotionPage.fromPartialCreatePageBodyParameters(notionPageInput);
+
+    const notionPage =
+      NotionPage.fromPartialCreatePageBodyParameters(pageParams);
+    notionPage.toggleHeadingChildren = toggleHeadingChildren;
+
+    return notionPage;
   }
 
-  private convertText(
+  /**
+   * Convert a text element without inline children.
+   * Used for toggleable headings where children are appended separately.
+   */
+  private convertTextWithoutChildren(
     element: TextElement
   ): ParagraphBlock | Heading1Block | Heading2Block | Heading3Block {
     switch (element.level) {
@@ -768,7 +816,7 @@ export class NotionConverterRepository
           heading_1: {
             rich_text: this.convertRichText(element.text),
             color: 'default',
-            is_toggleable: false, // Set based on your requirements
+            is_toggleable: element.isToggleable ?? false,
           },
         };
 
@@ -779,7 +827,7 @@ export class NotionConverterRepository
           heading_2: {
             rich_text: this.convertRichText(element.text),
             color: 'default',
-            is_toggleable: false,
+            is_toggleable: element.isToggleable ?? false,
           },
         };
 
@@ -790,7 +838,58 @@ export class NotionConverterRepository
           heading_3: {
             rich_text: this.convertRichText(element.text),
             color: 'default',
-            is_toggleable: false,
+            is_toggleable: element.isToggleable ?? false,
+          },
+        };
+
+      default:
+        return {
+          type: 'paragraph',
+          object: 'block',
+          paragraph: {
+            rich_text: this.convertRichText(element.text),
+            color: 'default',
+          },
+        };
+    }
+  }
+
+  private convertText(
+    element: TextElement
+  ): ParagraphBlock | Heading1Block | Heading2Block | Heading3Block {
+    // For toggleable headings with children, children are handled separately
+    // in convertPageElement and appended after block creation
+    switch (element.level) {
+      case TextElementLevel.Heading1:
+        return {
+          type: 'heading_1',
+          object: 'block',
+          heading_1: {
+            rich_text: this.convertRichText(element.text),
+            color: 'default',
+            is_toggleable: element.isToggleable ?? false,
+          },
+        };
+
+      case TextElementLevel.Heading2:
+        return {
+          type: 'heading_2',
+          object: 'block',
+          heading_2: {
+            rich_text: this.convertRichText(element.text),
+            color: 'default',
+            is_toggleable: element.isToggleable ?? false,
+          },
+        };
+
+      case TextElementLevel.Heading3:
+        return {
+          type: 'heading_3',
+          object: 'block',
+          heading_3: {
+            rich_text: this.convertRichText(element.text),
+            color: 'default',
+            is_toggleable: element.isToggleable ?? false,
           },
         };
 

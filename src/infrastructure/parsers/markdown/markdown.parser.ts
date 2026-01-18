@@ -20,6 +20,7 @@ import {
   RichTextElement,
   SupportedEmoji,
   TableElement,
+  TableOfContentsElement,
   TextElement,
   TextElementLevel,
 } from '@/domains/elements';
@@ -50,6 +51,32 @@ export class MarkdownParser extends ParserRepository {
     this.htmlParser = htmlParser;
 
     marked.use(markedKatex({ throwOnError: false, nonStandard: true }));
+
+    // Add custom extension for [table-of-contents] syntax
+    marked.use({
+      extensions: [
+        {
+          name: 'tableOfContents',
+          level: 'block',
+          start(src: string) {
+            return src.match(/^\[table-of-contents\]/i)?.index;
+          },
+          tokenizer(src: string) {
+            const match = /^\[table-of-contents\]/i.exec(src);
+            if (match) {
+              return {
+                type: 'tableOfContents',
+                raw: match[0],
+              };
+            }
+            return undefined;
+          },
+          renderer() {
+            return '';
+          },
+        },
+      ],
+    });
   }
 
   private preParseMarkdown(src: string): ExtendedToken[] {
@@ -86,12 +113,17 @@ export class MarkdownParser extends ParserRepository {
 
   /**
    * Parse a heading token
+   * Supports toggle headings with syntax: # > Heading text
    */
   private parseHeadingToken(token: Tokens.Heading): TextElement {
     const level = this.getTextLevelFromDepth(token.depth);
+    const isToggleable = token.text.startsWith('> ');
+    const text = isToggleable ? token.text.slice(2) : token.text;
+
     return new TextElement({
-      text: token.text,
+      text,
       level,
+      isToggleable,
     });
   }
 
@@ -401,11 +433,34 @@ export class MarkdownParser extends ParserRepository {
       case 'inlineKatex':
         elements.push(this.parseBlockKatexToken(token as EquationToken));
         break;
+      case 'tableOfContents':
+        elements.push(new TableOfContentsElement());
+        break;
       default:
         break;
     }
 
     return elements;
+  }
+
+  /**
+   * Get the heading depth from a token, or null if not a heading
+   */
+  private getHeadingDepth(token: ExtendedToken): number | null {
+    if (token.type === 'heading') {
+      return (token as Tokens.Heading).depth;
+    }
+    return null;
+  }
+
+  /**
+   * Check if a heading token is a toggle heading (starts with "> ")
+   */
+  private isToggleHeading(token: ExtendedToken): boolean {
+    if (token.type === 'heading') {
+      return (token as Tokens.Heading).text.startsWith('> ');
+    }
+    return false;
   }
 
   parse({
@@ -422,8 +477,38 @@ export class MarkdownParser extends ParserRepository {
 
     const elements: Element[] = [];
 
-    for (const token of tokens) {
-      elements.push(...this.parseToken(token));
+    let i = 0;
+    while (i < tokens.length) {
+      const token = tokens[i];
+
+      // Handle toggle headings specially - collect children
+      if (this.isToggleHeading(token)) {
+        const headingDepth = this.getHeadingDepth(token)!;
+        const headingElement = this.parseHeadingToken(token as Tokens.Heading);
+        const children: Element[] = [];
+
+        // Collect all following tokens until we hit a heading of same or higher level
+        i++;
+        while (i < tokens.length) {
+          const nextToken = tokens[i];
+          const nextDepth = this.getHeadingDepth(nextToken);
+
+          // Stop if we hit a heading of same or higher level (lower depth number)
+          if (nextDepth !== null && nextDepth <= headingDepth) {
+            break;
+          }
+
+          // Parse and add as child
+          children.push(...this.parseToken(nextToken));
+          i++;
+        }
+
+        headingElement.children = children.length > 0 ? children : undefined;
+        elements.push(headingElement);
+      } else {
+        elements.push(...this.parseToken(token));
+        i++;
+      }
     }
 
     const result: ParseResult = {

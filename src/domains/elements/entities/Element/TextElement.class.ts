@@ -34,6 +34,8 @@ export enum TextElementStyle {
 export class TextElement extends Element {
   public text: string | RichTextElement;
   public level: TextElementLevel;
+  public isToggleable: boolean = false;
+  public children?: Element[];
   public styles: TextElementStyles = {
     italic: false,
     bold: false,
@@ -47,6 +49,8 @@ export class TextElement extends Element {
     text,
     level = TextElementLevel.Paragraph,
     styles,
+    isToggleable = false,
+    children,
   }: {
     id?: string;
     text: string | RichTextElement;
@@ -58,10 +62,14 @@ export class TextElement extends Element {
       underline?: boolean;
       code?: boolean;
     };
+    isToggleable?: boolean;
+    children?: Element[];
   }) {
     super({ id, type: ElementType.Text });
     this.text = text;
     this.level = level;
+    this.isToggleable = isToggleable;
+    this.children = children;
     this.styles.bold = styles?.bold || false;
     this.styles.italic = styles?.italic || false;
     this.styles.strikethrough = styles?.strikethrough || false;

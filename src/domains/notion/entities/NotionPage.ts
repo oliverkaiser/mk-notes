@@ -11,6 +11,15 @@ import {
   PartialCreatePageBodyParameters,
 } from '@/domains/notion/types/types';
 
+/**
+ * Represents children that need to be appended to a toggle heading after it's created.
+ * The index refers to the position of the toggle heading in the children array.
+ */
+export interface ToggleHeadingChildren {
+  index: number;
+  children: BlockObjectRequest[];
+}
+
 export class NotionPage implements Page {
   public readonly pageId?: string;
   public readonly icon?: Icon;
@@ -24,6 +33,11 @@ export class NotionPage implements Page {
   public readonly createdAt?: Date;
   public readonly updatedAt?: Date;
   public readonly isLocked?: boolean;
+  /**
+   * Map of toggle heading children that need to be appended after the heading is created.
+   * This is needed because Notion API doesn't allow nested children in inline heading children.
+   */
+  public toggleHeadingChildren: ToggleHeadingChildren[] = [];
 
   constructor({
     pageId,
@@ -33,6 +47,7 @@ export class NotionPage implements Page {
     updatedAt,
     properties,
     isLocked,
+    toggleHeadingChildren,
   }: {
     pageId?: string;
     children: (
@@ -45,6 +60,7 @@ export class NotionPage implements Page {
     updatedAt?: Date;
     properties?: PageProperties;
     isLocked?: boolean;
+    toggleHeadingChildren?: ToggleHeadingChildren[];
   }) {
     this.pageId = pageId;
     this.children = children;
@@ -53,6 +69,7 @@ export class NotionPage implements Page {
     this.icon = icon;
     this.properties = properties;
     this.isLocked = isLocked;
+    this.toggleHeadingChildren = toggleHeadingChildren ?? [];
   }
 
   static fromPartialCreatePageBodyParameters(

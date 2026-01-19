@@ -1,5 +1,6 @@
 import { SupportedEmoji } from '../../types';
 import { Element } from './Element.class';
+import { RichTextElement } from './TextElement.class';
 import { ElementType } from './types';
 
 const specialCalloutRegex =
@@ -15,7 +16,7 @@ export enum SpecialCalloutType {
 }
 
 export class CalloutElement extends Element {
-  public text: string;
+  public text: string | RichTextElement;
   private readonly icon?: SupportedEmoji;
   private readonly calloutType?: SpecialCalloutType;
 
@@ -27,22 +28,33 @@ export class CalloutElement extends Element {
     id,
     icon,
     text,
+    calloutType,
   }: {
     id?: string;
     icon?: SupportedEmoji;
-    text: string;
+    text: string | RichTextElement;
+    calloutType?: SpecialCalloutType;
   }) {
     super({ id, type: ElementType.Callout });
 
     this.icon = icon;
     this.text = text;
 
-    const { text: parsedText, calloutType } =
-      this.getSpecialCalloutTypeAndText(text);
-
+    // If callout type is explicitly provided, use it
     if (calloutType) {
       this.calloutType = calloutType;
-      this.text = parsedText;
+      return;
+    }
+
+    // Only parse special callout type from string text
+    if (typeof text === 'string') {
+      const { text: parsedText, calloutType: parsedCalloutType } =
+        this.getSpecialCalloutTypeAndText(text);
+
+      if (parsedCalloutType) {
+        this.calloutType = parsedCalloutType;
+        this.text = parsedText;
+      }
     }
   }
 
@@ -93,6 +105,10 @@ export class CalloutElement extends Element {
   }
 
   public toContentString(): string {
-    return `[!${this.calloutType}](${this.text})`;
+    const content =
+      typeof this.text === 'string'
+        ? this.text
+        : this.text.map((el) => el.toContentString()).join('');
+    return `[!${this.calloutType}](${content})`;
   }
 }

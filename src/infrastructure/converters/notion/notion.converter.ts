@@ -18,6 +18,7 @@ import {
   PageElementPropertyValue,
   QuoteElement,
   RichTextElement,
+  TableCellContent,
   TableElement,
   TextElement,
   TextElementLevel,
@@ -1148,7 +1149,7 @@ export class NotionConverterRepository
     };
   }
 
-  private convertTableRow(row: string[]): TableRowBlock {
+  private convertTableRow(row: TableCellContent[]): TableRowBlock {
     return {
       type: 'table_row',
       object: 'block',

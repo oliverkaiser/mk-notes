@@ -13,6 +13,7 @@ import {
   LinkElement,
   ImageElement,
   EquationElement,
+  TableElement,
 } from '@/domains/elements';
 import winston from 'winston';
 import { assert } from 'console';
@@ -355,7 +356,30 @@ Another line with \`code\` and **bold \`code in bold\`** text.
       const calloutElement = result.content[0] as CalloutElement;
 
       expect(calloutElement).toBeInstanceOf(CalloutElement);
-      expect(calloutElement).toMatchObject({ text: 'This is a callout', icon: '💡' });
+      expect(calloutElement.getIcon()).toBe('ℹ️');
+      // text is now a RichTextElement array
+      expect(Array.isArray(calloutElement.text)).toBe(true);
+      const richText = calloutElement.text as TextElement[];
+      expect(richText[0].text).toBe('This is a callout');
+    });
+
+    it('should parse callouts with inline formatting', () => {
+      const markdown = `
+> 💡 **Lunch Note:** Maybe Indian place?
+`;
+
+      const result = parser.parse({ content: markdown });
+
+      expect(result.content).toHaveLength(1);
+      const quoteElement = result.content[0] as QuoteElement;
+      expect(quoteElement).toBeInstanceOf(QuoteElement);
+      // text is now a RichTextElement array with formatting
+      expect(Array.isArray(quoteElement.text)).toBe(true);
+      const richText = quoteElement.text as TextElement[];
+      // Should have elements for "💡 ", "Lunch Note:", " Maybe Indian place?"
+      const boldElement = richText.find((el) => el.styles?.bold);
+      expect(boldElement).toBeDefined();
+      expect(boldElement?.text).toBe('Lunch Note:');
     });
 
     it('should parse tables', () => {
@@ -368,12 +392,34 @@ Another line with \`code\` and **bold \`code in bold\`** text.
       const result = parser.parse({ content: markdown });
 
       expect(result.content).toHaveLength(1);
-      expect(result.content[0]).toMatchObject({
-        rows: [
-          ['Header 1', 'Header 2'],
-          ['Cell 1', 'Cell 2'],
-        ],
-      });
+      const tableElement = result.content[0] as TableElement;
+      expect(tableElement).toBeInstanceOf(TableElement);
+      expect(tableElement.rows).toHaveLength(2);
+      // Each cell is now a RichTextElement (array of TextElements)
+      expect(tableElement.rows[0][0]).toHaveLength(1);
+      expect((tableElement.rows[0][0] as TextElement[])[0].text).toBe('Header 1');
+      expect((tableElement.rows[0][1] as TextElement[])[0].text).toBe('Header 2');
+      expect((tableElement.rows[1][0] as TextElement[])[0].text).toBe('Cell 1');
+      expect((tableElement.rows[1][1] as TextElement[])[0].text).toBe('Cell 2');
+    });
+
+    it('should parse tables with inline formatting', () => {
+      const markdown = `
+| Info | Details |
+|------|---------|
+| **Dates** | Tuesday 27th |
+`;
+
+      const result = parser.parse({ content: markdown });
+
+      expect(result.content).toHaveLength(1);
+      const tableElement = result.content[0] as TableElement;
+      expect(tableElement).toBeInstanceOf(TableElement);
+      // Check that the bold formatting is parsed
+      const boldCell = tableElement.rows[1][0] as TextElement[];
+      expect(boldCell[0]).toBeInstanceOf(TextElement);
+      expect(boldCell[0].text).toBe('Dates');
+      expect(boldCell[0].styles.bold).toBe(true);
     });
 
     it('should parse links and images', () => {

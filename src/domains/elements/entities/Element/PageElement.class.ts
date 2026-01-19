@@ -29,6 +29,8 @@ export class PageElement extends Element {
   public content: Element[];
   public properties?: PageElementProperties[];
   public source?: File;
+  /** Extra frontmatter keys not part of the known schema */
+  public extraFrontmatter?: Record<string, unknown>;
 
   constructor({
     id,
@@ -37,6 +39,7 @@ export class PageElement extends Element {
     content = [],
     properties,
     source,
+    extraFrontmatter,
   }: {
     id?: string;
     title: string;
@@ -44,6 +47,7 @@ export class PageElement extends Element {
     content: Element[];
     properties?: PageElementProperties[];
     source?: File;
+    extraFrontmatter?: Record<string, unknown>;
   }) {
     super({ id, type: ElementType.Page });
     this.title = title;
@@ -51,6 +55,7 @@ export class PageElement extends Element {
     this.content = content;
     this.properties = properties;
     this.source = source;
+    this.extraFrontmatter = extraFrontmatter;
   }
 
   public getIcon(): SupportedEmoji | undefined {

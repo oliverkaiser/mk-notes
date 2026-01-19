@@ -18,6 +18,7 @@ import {
   ParserRepository,
   QuoteElement,
   RichTextElement,
+  SpecialCalloutType,
   SupportedEmoji,
   TableElement,
   TableOfContentsElement,
@@ -157,16 +158,130 @@ export class MarkdownParser extends ParserRepository {
   private parseBlockQuoteToken(
     token: Tokens.Blockquote
   ): QuoteElement | CalloutElement {
-    const text = token.text.trim();
-    if (text.startsWith('[!NOTE]')) {
+    const rawText = token.text.trim();
+
+    // Check for special callout syntax first using raw text
+    if (CalloutElement.isSpecialCalloutText(rawText)) {
+      // Detect the callout type from raw text
+      const calloutType = this.detectCalloutType(rawText);
+
+      // Parse the content to get formatting
+      const richText = this.parseBlockQuoteContent(token);
+
+      // If we have rich text, strip the callout marker from the first element if it's text
+      if (richText.length > 0) {
+        const strippedRichText = this.stripCalloutMarkerFromRichText(richText);
+        if (strippedRichText.length > 0) {
+          return new CalloutElement({
+            text: strippedRichText,
+            calloutType,
+          });
+        }
+      }
+
+      // Fallback to raw text (constructor will strip marker and detect type)
       return new CalloutElement({
-        text: text.replace('[!NOTE]', '').trim(),
-        icon: '💡',
+        text: rawText,
       });
     }
+
+    // For regular quotes, parse inline formatting
+    const richText = this.parseBlockQuoteContent(token);
+    if (richText.length > 0) {
+      return new QuoteElement({
+        text: richText,
+      });
+    }
+
     return new QuoteElement({
-      text: text,
+      text: rawText,
     });
+  }
+
+  private detectCalloutType(text: string): SpecialCalloutType | undefined {
+    const calloutMarkerRegex = /^\s*\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]/i;
+    const match = calloutMarkerRegex.exec(text);
+    if (match) {
+      const typeString = match[1].toLowerCase();
+      const typeMap: Record<string, SpecialCalloutType> = {
+        note: SpecialCalloutType.Note,
+        tip: SpecialCalloutType.Tip,
+        important: SpecialCalloutType.Important,
+        warning: SpecialCalloutType.Warning,
+        caution: SpecialCalloutType.Caution,
+      };
+      return typeMap[typeString];
+    }
+    return undefined;
+  }
+
+  private stripCalloutMarkerFromRichText(
+    elements: RichTextElement
+  ): RichTextElement {
+    if (elements.length === 0) return elements;
+
+    const calloutMarkerRegex =
+      /^\s*\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*/i;
+
+    // Clone the array to avoid mutating the original
+    const result: RichTextElement = [...elements];
+    const [firstElement] = result;
+
+    // Only strip from TextElement that contains the marker
+    if (
+      firstElement instanceof TextElement &&
+      typeof firstElement.text === 'string'
+    ) {
+      const match = calloutMarkerRegex.exec(firstElement.text);
+      if (match) {
+        const strippedText = firstElement.text.slice(match[0].length);
+        if (strippedText.length > 0) {
+          result[0] = new TextElement({
+            text: strippedText,
+            styles: firstElement.styles,
+          });
+        } else {
+          // Remove the first element if it becomes empty
+          result.shift();
+        }
+      }
+    }
+
+    return result;
+  }
+
+  private parseBlockQuoteContent(token: Tokens.Blockquote): RichTextElement {
+    const elements: RichTextElement = [];
+
+    // Blockquote tokens contain block-level tokens (paragraphs, etc.)
+    if (token.tokens) {
+      for (const t of token.tokens) {
+        if (t.type === 'paragraph') {
+          elements.push(...this.parseParagraphToken(t as Tokens.Paragraph));
+        } else if (t.type === 'text' && 'tokens' in t && t.tokens) {
+          // Handle text tokens with nested tokens
+          for (const nestedToken of t.tokens) {
+            if (nestedToken.type === 'text') {
+              elements.push(this.parseTextToken(nestedToken as Tokens.Text));
+            } else if (nestedToken.type === 'strong') {
+              elements.push(this.parseTextToken(nestedToken as Tokens.Strong));
+            } else if (nestedToken.type === 'em') {
+              elements.push(this.parseTextToken(nestedToken as Tokens.Em));
+            } else if (nestedToken.type === 'del') {
+              elements.push(this.parseTextToken(nestedToken as Tokens.Del));
+            } else if (nestedToken.type === 'codespan') {
+              elements.push(
+                this.parseTextToken(nestedToken as Tokens.Codespan)
+              );
+            } else if (nestedToken.type === 'link') {
+              elements.push(this.parseLinkToken(nestedToken as Tokens.Link));
+            }
+          }
+        }
+      }
+    }
+
+    return elements;
   }
 
   private parseCodeToken(token: Tokens.Code): CodeElement {
@@ -206,12 +321,49 @@ export class MarkdownParser extends ParserRepository {
   }
 
   private parseTableToken(token: Tokens.Table): TableElement {
-    const headers = token.header.map((cell) => cell.text);
-    const rows = token.rows.map((row) => row.map((cell) => cell.text));
+    const headers = token.header.map((cell) => this.parseTableCellTokens(cell));
+    const rows = token.rows.map((row) =>
+      row.map((cell) => this.parseTableCellTokens(cell))
+    );
 
     return new TableElement({
       rows: [headers, ...rows],
     });
+  }
+
+  private parseTableCellTokens(cell: Tokens.TableCell): RichTextElement {
+    const elements: RichTextElement = [];
+
+    cell.tokens.forEach((t) => {
+      switch (t.type) {
+        case 'text':
+          elements.push(this.parseTextToken(t as Tokens.Text));
+          break;
+        case 'inlineKatex':
+          elements.push(this.parseBlockKatexToken(t as EquationToken));
+          break;
+        case 'strong':
+          elements.push(this.parseTextToken(t as Tokens.Strong));
+          break;
+        case 'em':
+          elements.push(this.parseTextToken(t as Tokens.Em));
+          break;
+        case 'del':
+          elements.push(this.parseTextToken(t as Tokens.Del));
+          break;
+        case 'codespan':
+          elements.push(this.parseTextToken(t as Tokens.Codespan));
+          break;
+        case 'link':
+          elements.push(this.parseLinkToken(t as Tokens.Link));
+          break;
+        case 'image':
+          elements.push(this.parseImageToken(t as Tokens.Image));
+          break;
+      }
+    });
+
+    return elements;
   }
 
   private parseImageToken(token: Tokens.Image): ImageElement {
@@ -531,6 +683,18 @@ export class MarkdownParser extends ParserRepository {
 
     if (fileMetadata.properties && Array.isArray(fileMetadata.properties)) {
       result.properties = fileMetadata.properties;
+    }
+
+    // Extract extra frontmatter keys (not part of the known schema)
+    const knownKeys = new Set(['id', 'title', 'icon', 'properties']);
+    const extraFrontmatter: Record<string, unknown> = {};
+    for (const key of Object.keys(fileMetadata)) {
+      if (!knownKeys.has(key)) {
+        extraFrontmatter[key] = fileMetadata[key as keyof typeof fileMetadata];
+      }
+    }
+    if (Object.keys(extraFrontmatter).length > 0) {
+      result.extraFrontmatter = extraFrontmatter;
     }
 
     // Clear the filepath context after parsing

@@ -111,9 +111,39 @@ export class FileConverter
       );
     }
 
+    // Write extra frontmatter keys (not part of the known schema)
+    if (pageElement.extraFrontmatter) {
+      for (const [key, value] of Object.entries(pageElement.extraFrontmatter)) {
+        frontmatter.push(
+          `${key}: ${this.serializeExtraFrontmatterValue(value)}`
+        );
+      }
+    }
+
     frontmatter.push('---');
 
     return frontmatter.join('\n');
+  }
+
+  /**
+   * Serializes a value from extra frontmatter to a YAML-compatible string.
+   */
+  private serializeExtraFrontmatterValue(value: unknown): string {
+    if (typeof value === 'string') {
+      return this.quoteYamlStringIfNeeded(value);
+    }
+
+    if (typeof value === 'number' || typeof value === 'boolean') {
+      return String(value);
+    }
+
+    if (value === null || value === undefined) {
+      return 'null';
+    }
+
+    // For complex values (arrays, objects), use JSON stringification
+    // which is valid YAML for simple structures
+    return JSON.stringify(value);
   }
 
   private getPageElementPropertiesString(
@@ -139,7 +169,7 @@ export class FileConverter
 
   private getPropertyValueString(value: PageElementPropertyValue): string {
     if (typeof value === 'string') {
-      return value;
+      return this.quoteYamlStringIfNeeded(value);
     }
 
     if (typeof value === 'number') {
@@ -170,12 +200,39 @@ export class FileConverter
     throw new Error(`Unsupported property value type: ${typeof value}`);
   }
 
+  /**
+   * Checks if a string needs to be quoted for valid YAML and quotes it if necessary.
+   * Strings need quoting if they contain YAML special characters or patterns.
+   */
+  private quoteYamlStringIfNeeded(value: string): string {
+    // Characters and patterns that require quoting in YAML
+    const needsQuoting =
+      // Contains YAML special characters
+      /[[\]{}:#&*!|>'"%@`]/.test(value) ||
+      // Starts with special characters
+      /^[-?]/.test(value) ||
+      // Has leading/trailing whitespace
+      value !== value.trim() ||
+      // Could be interpreted as a number, boolean, or null
+      /^(true|false|null|~|[0-9.+-]+)$/i.test(value) ||
+      // Empty string
+      value === '';
+
+    if (needsQuoting) {
+      // Escape backslashes and double quotes, then wrap in double quotes
+      const escaped = value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+      return `"${escaped}"`;
+    }
+
+    return value;
+  }
+
   private getPropertyValueStringArray(
     value: PageElementPropertyValue[]
   ): string {
     return [
       `[`,
-      value.map((v) => this.getPropertyValueString(v)).join(','),
+      value.map((v) => this.getPropertyValueString(v)).join(', '),
       `]`,
     ].join('');
   }

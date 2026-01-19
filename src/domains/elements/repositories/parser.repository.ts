@@ -9,6 +9,8 @@ export interface ParseResult {
   properties?: PageElementProperties[];
   content: Element[];
   icon?: SupportedEmoji;
+  /** Extra frontmatter keys not part of the known schema */
+  extraFrontmatter?: Record<string, unknown>;
 }
 
 export class ParserRepository {

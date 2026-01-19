@@ -78806,14 +78806,22 @@ class CalloutElement extends Element_class_1.Element {
     static isSpecialCalloutText(text) {
         return specialCalloutRegex.test(text.trim());
     }
-    constructor({ id, icon, text, }) {
+    constructor({ id, icon, text, calloutType, }) {
         super({ id, type: types_1.ElementType.Callout });
         this.icon = icon;
         this.text = text;
-        const { text: parsedText, calloutType } = this.getSpecialCalloutTypeAndText(text);
+        // If callout type is explicitly provided, use it
         if (calloutType) {
             this.calloutType = calloutType;
-            this.text = parsedText;
+            return;
+        }
+        // Only parse special callout type from string text
+        if (typeof text === 'string') {
+            const { text: parsedText, calloutType: parsedCalloutType } = this.getSpecialCalloutTypeAndText(text);
+            if (parsedCalloutType) {
+                this.calloutType = parsedCalloutType;
+                this.text = parsedText;
+            }
         }
     }
     getSpecialCalloutTypeAndText(text) {
@@ -78852,7 +78860,10 @@ class CalloutElement extends Element_class_1.Element {
         return this.icon;
     }
     toContentString() {
-        return `[!${this.calloutType}](${this.text})`;
+        const content = typeof this.text === 'string'
+            ? this.text
+            : this.text.map((el) => el.toContentString()).join('');
+        return `[!${this.calloutType}](${content})`;
     }
 }
 exports.CalloutElement = CalloutElement;
@@ -79188,13 +79199,16 @@ class PageElement extends Element_class_1.Element {
     content;
     properties;
     source;
-    constructor({ id, title, icon, content = [], properties, source, }) {
+    /** Extra frontmatter keys not part of the known schema */
+    extraFrontmatter;
+    constructor({ id, title, icon, content = [], properties, source, extraFrontmatter, }) {
         super({ id, type: types_1.ElementType.Page });
         this.title = title;
         this.icon = icon;
         this.content = content;
         this.properties = properties;
         this.source = source;
+        this.extraFrontmatter = extraFrontmatter;
     }
     getIcon() {
         return this.icon;
@@ -79227,7 +79241,11 @@ class QuoteElement extends Element_class_1.Element {
         this.text = text;
     }
     toContentString() {
-        return `> ${this.text}`;
+        if (typeof this.text === 'string') {
+            return `> ${this.text}`;
+        }
+        const content = this.text.map((el) => el.toContentString()).join('');
+        return `> ${content}`;
     }
 }
 exports.QuoteElement = QuoteElement;
@@ -79251,7 +79269,17 @@ class TableElement extends Element_class_1.Element {
         this.rows = rows;
     }
     toContentString() {
-        return this.rows.map((row) => row.join(' | ')).join('\n');
+        return this.rows
+            .map((row) => row
+            .map((cell) => {
+            if (typeof cell === 'string') {
+                return cell;
+            }
+            // RichTextElement is an array
+            return cell.map((element) => element.toContentString()).join('');
+        })
+            .join(' | '))
+            .join('\n');
     }
 }
 exports.TableElement = TableElement;
@@ -80768,8 +80796,31 @@ class FileConverter {
             frontmatter.push('properties:');
             frontmatter.push(this.getPageElementPropertiesString(pageElement.properties));
         }
+        // Write extra frontmatter keys (not part of the known schema)
+        if (pageElement.extraFrontmatter) {
+            for (const [key, value] of Object.entries(pageElement.extraFrontmatter)) {
+                frontmatter.push(`${key}: ${this.serializeExtraFrontmatterValue(value)}`);
+            }
+        }
         frontmatter.push('---');
         return frontmatter.join('\n');
+    }
+    /**
+     * Serializes a value from extra frontmatter to a YAML-compatible string.
+     */
+    serializeExtraFrontmatterValue(value) {
+        if (typeof value === 'string') {
+            return this.quoteYamlStringIfNeeded(value);
+        }
+        if (typeof value === 'number' || typeof value === 'boolean') {
+            return String(value);
+        }
+        if (value === null || value === undefined) {
+            return 'null';
+        }
+        // For complex values (arrays, objects), use JSON stringification
+        // which is valid YAML for simple structures
+        return JSON.stringify(value);
     }
     getPageElementPropertiesString(properties) {
         const propertiesString = [];
@@ -80786,7 +80837,7 @@ class FileConverter {
     }
     getPropertyValueString(value) {
         if (typeof value === 'string') {
-            return value;
+            return this.quoteYamlStringIfNeeded(value);
         }
         if (typeof value === 'number') {
             return value.toString();
@@ -80809,10 +80860,34 @@ class FileConverter {
         }
         throw new Error(`Unsupported property value type: ${typeof value}`);
     }
+    /**
+     * Checks if a string needs to be quoted for valid YAML and quotes it if necessary.
+     * Strings need quoting if they contain YAML special characters or patterns.
+     */
+    quoteYamlStringIfNeeded(value) {
+        // Characters and patterns that require quoting in YAML
+        const needsQuoting = 
+        // Contains YAML special characters
+        /[[\]{}:#&*!|>'"%@`]/.test(value) ||
+            // Starts with special characters
+            /^[-?]/.test(value) ||
+            // Has leading/trailing whitespace
+            value !== value.trim() ||
+            // Could be interpreted as a number, boolean, or null
+            /^(true|false|null|~|[0-9.+-]+)$/i.test(value) ||
+            // Empty string
+            value === '';
+        if (needsQuoting) {
+            // Escape backslashes and double quotes, then wrap in double quotes
+            const escaped = value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+            return `"${escaped}"`;
+        }
+        return value;
+    }
     getPropertyValueStringArray(value) {
         return [
             `[`,
-            value.map((v) => this.getPropertyValueString(v)).join(','),
+            value.map((v) => this.getPropertyValueString(v)).join(', '),
             `]`,
         ].join('');
     }
@@ -83401,16 +83476,116 @@ class MarkdownParser extends elements_1.ParserRepository {
         });
     }
     parseBlockQuoteToken(token) {
-        const text = token.text.trim();
-        if (text.startsWith('[!NOTE]')) {
+        const rawText = token.text.trim();
+        // Check for special callout syntax first using raw text
+        if (elements_1.CalloutElement.isSpecialCalloutText(rawText)) {
+            // Detect the callout type from raw text
+            const calloutType = this.detectCalloutType(rawText);
+            // Parse the content to get formatting
+            const richText = this.parseBlockQuoteContent(token);
+            // If we have rich text, strip the callout marker from the first element if it's text
+            if (richText.length > 0) {
+                const strippedRichText = this.stripCalloutMarkerFromRichText(richText);
+                if (strippedRichText.length > 0) {
+                    return new elements_1.CalloutElement({
+                        text: strippedRichText,
+                        calloutType,
+                    });
+                }
+            }
+            // Fallback to raw text (constructor will strip marker and detect type)
             return new elements_1.CalloutElement({
-                text: text.replace('[!NOTE]', '').trim(),
-                icon: '💡',
+                text: rawText,
+            });
+        }
+        // For regular quotes, parse inline formatting
+        const richText = this.parseBlockQuoteContent(token);
+        if (richText.length > 0) {
+            return new elements_1.QuoteElement({
+                text: richText,
             });
         }
         return new elements_1.QuoteElement({
-            text: text,
+            text: rawText,
         });
+    }
+    detectCalloutType(text) {
+        const calloutMarkerRegex = /^\s*\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]/i;
+        const match = calloutMarkerRegex.exec(text);
+        if (match) {
+            const typeString = match[1].toLowerCase();
+            const typeMap = {
+                note: elements_1.SpecialCalloutType.Note,
+                tip: elements_1.SpecialCalloutType.Tip,
+                important: elements_1.SpecialCalloutType.Important,
+                warning: elements_1.SpecialCalloutType.Warning,
+                caution: elements_1.SpecialCalloutType.Caution,
+            };
+            return typeMap[typeString];
+        }
+        return undefined;
+    }
+    stripCalloutMarkerFromRichText(elements) {
+        if (elements.length === 0)
+            return elements;
+        const calloutMarkerRegex = /^\s*\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*/i;
+        // Clone the array to avoid mutating the original
+        const result = [...elements];
+        const [firstElement] = result;
+        // Only strip from TextElement that contains the marker
+        if (firstElement instanceof elements_1.TextElement &&
+            typeof firstElement.text === 'string') {
+            const match = calloutMarkerRegex.exec(firstElement.text);
+            if (match) {
+                const strippedText = firstElement.text.slice(match[0].length);
+                if (strippedText.length > 0) {
+                    result[0] = new elements_1.TextElement({
+                        text: strippedText,
+                        styles: firstElement.styles,
+                    });
+                }
+                else {
+                    // Remove the first element if it becomes empty
+                    result.shift();
+                }
+            }
+        }
+        return result;
+    }
+    parseBlockQuoteContent(token) {
+        const elements = [];
+        // Blockquote tokens contain block-level tokens (paragraphs, etc.)
+        if (token.tokens) {
+            for (const t of token.tokens) {
+                if (t.type === 'paragraph') {
+                    elements.push(...this.parseParagraphToken(t));
+                }
+                else if (t.type === 'text' && 'tokens' in t && t.tokens) {
+                    // Handle text tokens with nested tokens
+                    for (const nestedToken of t.tokens) {
+                        if (nestedToken.type === 'text') {
+                            elements.push(this.parseTextToken(nestedToken));
+                        }
+                        else if (nestedToken.type === 'strong') {
+                            elements.push(this.parseTextToken(nestedToken));
+                        }
+                        else if (nestedToken.type === 'em') {
+                            elements.push(this.parseTextToken(nestedToken));
+                        }
+                        else if (nestedToken.type === 'del') {
+                            elements.push(this.parseTextToken(nestedToken));
+                        }
+                        else if (nestedToken.type === 'codespan') {
+                            elements.push(this.parseTextToken(nestedToken));
+                        }
+                        else if (nestedToken.type === 'link') {
+                            elements.push(this.parseLinkToken(nestedToken));
+                        }
+                    }
+                }
+            }
+        }
+        return elements;
     }
     parseCodeToken(token) {
         const language = token.lang || elements_1.ElementCodeLanguage.PlainText;
@@ -83442,11 +83617,43 @@ class MarkdownParser extends elements_1.ParserRepository {
         });
     }
     parseTableToken(token) {
-        const headers = token.header.map((cell) => cell.text);
-        const rows = token.rows.map((row) => row.map((cell) => cell.text));
+        const headers = token.header.map((cell) => this.parseTableCellTokens(cell));
+        const rows = token.rows.map((row) => row.map((cell) => this.parseTableCellTokens(cell)));
         return new elements_1.TableElement({
             rows: [headers, ...rows],
         });
+    }
+    parseTableCellTokens(cell) {
+        const elements = [];
+        cell.tokens.forEach((t) => {
+            switch (t.type) {
+                case 'text':
+                    elements.push(this.parseTextToken(t));
+                    break;
+                case 'inlineKatex':
+                    elements.push(this.parseBlockKatexToken(t));
+                    break;
+                case 'strong':
+                    elements.push(this.parseTextToken(t));
+                    break;
+                case 'em':
+                    elements.push(this.parseTextToken(t));
+                    break;
+                case 'del':
+                    elements.push(this.parseTextToken(t));
+                    break;
+                case 'codespan':
+                    elements.push(this.parseTextToken(t));
+                    break;
+                case 'link':
+                    elements.push(this.parseLinkToken(t));
+                    break;
+                case 'image':
+                    elements.push(this.parseImageToken(t));
+                    break;
+            }
+        });
+        return elements;
     }
     parseImageToken(token) {
         return new elements_1.ImageElement({
@@ -83716,6 +83923,17 @@ class MarkdownParser extends elements_1.ParserRepository {
         }
         if (fileMetadata.properties && Array.isArray(fileMetadata.properties)) {
             result.properties = fileMetadata.properties;
+        }
+        // Extract extra frontmatter keys (not part of the known schema)
+        const knownKeys = new Set(['id', 'title', 'icon', 'properties']);
+        const extraFrontmatter = {};
+        for (const key of Object.keys(fileMetadata)) {
+            if (!knownKeys.has(key)) {
+                extraFrontmatter[key] = fileMetadata[key];
+            }
+        }
+        if (Object.keys(extraFrontmatter).length > 0) {
+            result.extraFrontmatter = extraFrontmatter;
         }
         // Clear the filepath context after parsing
         this.parsingFilePath = undefined;

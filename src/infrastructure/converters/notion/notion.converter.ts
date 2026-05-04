@@ -1213,14 +1213,17 @@ export class NotionConverterRepository
   }
 
   /**
-   * Returns the canonical hyphenated Notion UUID if `url` is a bare UUID
-   * or a Notion page URL, otherwise returns null.
+   * Returns the canonical hyphenated Notion UUID if `url` is a bare UUID,
+   * a leading-slash path containing a UUID (e.g. `/34fa39b9...`), or a
+   * Notion page URL — otherwise returns null.
    */
   private extractNotionPageId(url: string): string | null {
     const trimmed = url.trim();
 
-    if (NotionConverterRepository.NOTION_UUID_REGEX.test(trimmed)) {
-      return this.formatUuid(trimmed.replace(/-/g, '').toLowerCase());
+    // Strip a single leading slash so `/34fa39b9...` is treated as a bare UUID.
+    const bare = trimmed.startsWith('/') ? trimmed.slice(1) : trimmed;
+    if (NotionConverterRepository.NOTION_UUID_REGEX.test(bare)) {
+      return this.formatUuid(bare.replace(/-/g, '').toLowerCase());
     }
 
     const urlMatch = NotionConverterRepository.NOTION_URL_REGEX.exec(trimmed);
@@ -1231,8 +1234,33 @@ export class NotionConverterRepository
     return null;
   }
 
+  private buildLinkAnnotations(
+    element: LinkElement
+  ): RichTextItemRequest['annotations'] | undefined {
+    const { styles } = element;
+    if (
+      !styles.bold &&
+      !styles.italic &&
+      !styles.strikethrough &&
+      !styles.underline &&
+      !styles.code
+    ) {
+      return undefined;
+    }
+
+    return {
+      bold: styles.bold,
+      italic: styles.italic,
+      strikethrough: styles.strikethrough,
+      underline: styles.underline,
+      code: styles.code,
+    };
+  }
+
   private buildLinkRichTextItem(element: LinkElement): RichTextItemRequest {
+    const annotations = this.buildLinkAnnotations(element);
     const pageId = this.extractNotionPageId(element.url);
+
     if (pageId) {
       return {
         type: 'mention',
@@ -1240,6 +1268,7 @@ export class NotionConverterRepository
           type: 'page',
           page: { id: pageId },
         },
+        ...(annotations ? { annotations } : {}),
       };
     }
 
@@ -1249,6 +1278,7 @@ export class NotionConverterRepository
         content: element.text,
         link: element.url.startsWith('http') ? { url: element.url } : null,
       },
+      ...(annotations ? { annotations } : {}),
     };
   }
 

@@ -380,11 +380,56 @@ export class MarkdownParser extends ParserRepository {
     return content;
   }
 
+  /**
+   * If the link's inner content is a single styled inline token
+   * (e.g. `[**bold**](url)`, `[*italic*](url)`, `[`code`](url)`,
+   * `[~~strike~~](url)`), extract that style and use the inner text.
+   * Mixed inline content falls back to the link's plain text with no styles.
+   */
+  private extractLinkLabelStyles(token: Tokens.Link): {
+    text: string;
+    styles?: {
+      bold?: boolean;
+      italic?: boolean;
+      strikethrough?: boolean;
+      code?: boolean;
+    };
+  } {
+    const innerTokens = token.tokens;
+
+    if (innerTokens?.length === 1) {
+      const [child] = innerTokens;
+      switch (child.type) {
+        case 'strong':
+          return {
+            text: (child as Tokens.Strong).text,
+            styles: { bold: true },
+          };
+        case 'em':
+          return { text: (child as Tokens.Em).text, styles: { italic: true } };
+        case 'del':
+          return {
+            text: (child as Tokens.Del).text,
+            styles: { strikethrough: true },
+          };
+        case 'codespan':
+          return {
+            text: (child as Tokens.Codespan).text,
+            styles: { code: true },
+          };
+      }
+    }
+
+    return { text: token.text };
+  }
+
   private parseLinkToken(token: Tokens.Link): LinkElement {
+    const { text, styles } = this.extractLinkLabelStyles(token);
     return new LinkElement({
-      text: token.text,
+      text,
       url: token.href,
       filepath: this.parsingFilePath,
+      styles,
     });
   }
 

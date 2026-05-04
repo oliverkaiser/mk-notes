@@ -72,7 +72,26 @@ type EquationItemRequest = {
   href?: string | null;
 };
 
-export type RichTextItemRequest = TextItemRequest | EquationItemRequest;
+type MentionItemRequest = {
+  type?: 'mention';
+  mention:
+    | {
+        type?: 'page';
+        page: { id: IdRequest };
+      }
+    | {
+        type?: 'database';
+        database: { id: IdRequest };
+      };
+  annotations?: TextAnnotation;
+  plain_text?: string;
+  href?: string | null;
+};
+
+export type RichTextItemRequest =
+  | TextItemRequest
+  | EquationItemRequest
+  | MentionItemRequest;
 
 export type Parent = CreatePageParameters['parent'];
 

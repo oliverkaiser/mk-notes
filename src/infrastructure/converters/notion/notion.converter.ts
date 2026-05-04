@@ -1179,21 +1179,85 @@ export class NotionConverterRepository
     };
   }
 
+  /**
+   * Matches a bare Notion page/block UUID, with or without hyphens.
+   * Examples:
+   *   34fa39b9-f204-8189-a2e6-cf48c13d6892
+   *   34fa39b9f2048189a2e6cf48c13d6892
+   */
+  private static readonly NOTION_UUID_REGEX =
+    /^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$/i;
+
+  /**
+   * Matches a Notion page/database URL ending in a 32-char UUID
+   * (optionally hyphenated). Captures the UUID portion.
+   * Examples:
+   *   https://www.notion.so/Page-Title-34fa39b9f2048189a2e6cf48c13d6892
+   *   https://www.notion.so/workspace/Page-Title-34fa39b9f2048189a2e6cf48c13d6892?v=...
+   *   https://notion.so/34fa39b9-f204-8189-a2e6-cf48c13d6892
+   */
+  private static readonly NOTION_URL_REGEX =
+    /^https?:\/\/(?:www\.)?notion\.so\/(?:[^?#]*?[-/])?([0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12})(?:[?#].*)?$/i;
+
+  /**
+   * Formats a 32-char hex string as a canonical hyphenated UUID (8-4-4-4-12).
+   */
+  private formatUuid(hex: string): string {
+    return [
+      hex.slice(0, 8),
+      hex.slice(8, 12),
+      hex.slice(12, 16),
+      hex.slice(16, 20),
+      hex.slice(20, 32),
+    ].join('-');
+  }
+
+  /**
+   * Returns the canonical hyphenated Notion UUID if `url` is a bare UUID
+   * or a Notion page URL, otherwise returns null.
+   */
+  private extractNotionPageId(url: string): string | null {
+    const trimmed = url.trim();
+
+    if (NotionConverterRepository.NOTION_UUID_REGEX.test(trimmed)) {
+      return this.formatUuid(trimmed.replace(/-/g, '').toLowerCase());
+    }
+
+    const urlMatch = NotionConverterRepository.NOTION_URL_REGEX.exec(trimmed);
+    if (urlMatch) {
+      return this.formatUuid(urlMatch[1].replace(/-/g, '').toLowerCase());
+    }
+
+    return null;
+  }
+
+  private buildLinkRichTextItem(element: LinkElement): RichTextItemRequest {
+    const pageId = this.extractNotionPageId(element.url);
+    if (pageId) {
+      return {
+        type: 'mention',
+        mention: {
+          type: 'page',
+          page: { id: pageId },
+        },
+      };
+    }
+
+    return {
+      type: 'text',
+      text: {
+        content: element.text,
+        link: element.url.startsWith('http') ? { url: element.url } : null,
+      },
+    };
+  }
+
   private convertLink(element: LinkElement): BlockObjectRequest {
     return {
       type: 'paragraph',
       object: 'block',
       paragraph: {
-        rich_text: [
-          {
-            text: {
-              content: element.text,
-              link: element.url.startsWith('http')
-                ? { url: element.url }
-                : null,
-            },
-          },
-        ],
+        rich_text: [this.buildLinkRichTextItem(element)],
         color: 'default',
       },
     };
@@ -1430,15 +1494,7 @@ export class NotionConverterRepository
         }
 
         if (element instanceof LinkElement) {
-          acc.push({
-            type: 'text',
-            text: {
-              content: element.text,
-              link: element.url.startsWith('http')
-                ? { url: element.url }
-                : null,
-            },
-          });
+          acc.push(this.buildLinkRichTextItem(element));
         }
 
         if (element instanceof EquationElement) {

@@ -79062,15 +79062,40 @@ class LinkElement extends Element_class_1.Element {
     text;
     caption;
     filepath;
-    constructor({ id, url, text, caption, filepath, }) {
+    styles = {
+        italic: false,
+        bold: false,
+        strikethrough: false,
+        underline: false,
+        code: false,
+    };
+    constructor({ id, url, text, caption, filepath, styles, }) {
         super({ id, type: types_1.ElementType.Link });
         this.url = url;
         this.text = text;
         this.caption = caption;
         this.filepath = filepath;
+        this.styles.bold = styles?.bold || false;
+        this.styles.italic = styles?.italic || false;
+        this.styles.strikethrough = styles?.strikethrough || false;
+        this.styles.underline = styles?.underline || false;
+        this.styles.code = styles?.code || false;
     }
     toContentString() {
-        return `[${this.text}](${this.url})`;
+        let label = this.text;
+        if (this.styles.code) {
+            label = `\`${label}\``;
+        }
+        if (this.styles.bold) {
+            label = `**${label}**`;
+        }
+        if (this.styles.italic) {
+            label = `_${label}_`;
+        }
+        if (this.styles.strikethrough) {
+            label = `~~${label}~~`;
+        }
+        return `[${label}](${this.url})`;
     }
 }
 exports.LinkElement = LinkElement;
@@ -81745,13 +81770,16 @@ class NotionConverterRepository {
         ].join('-');
     }
     /**
-     * Returns the canonical hyphenated Notion UUID if `url` is a bare UUID
-     * or a Notion page URL, otherwise returns null.
+     * Returns the canonical hyphenated Notion UUID if `url` is a bare UUID,
+     * a leading-slash path containing a UUID (e.g. `/34fa39b9...`), or a
+     * Notion page URL — otherwise returns null.
      */
     extractNotionPageId(url) {
         const trimmed = url.trim();
-        if (NotionConverterRepository.NOTION_UUID_REGEX.test(trimmed)) {
-            return this.formatUuid(trimmed.replace(/-/g, '').toLowerCase());
+        // Strip a single leading slash so `/34fa39b9...` is treated as a bare UUID.
+        const bare = trimmed.startsWith('/') ? trimmed.slice(1) : trimmed;
+        if (NotionConverterRepository.NOTION_UUID_REGEX.test(bare)) {
+            return this.formatUuid(bare.replace(/-/g, '').toLowerCase());
         }
         const urlMatch = NotionConverterRepository.NOTION_URL_REGEX.exec(trimmed);
         if (urlMatch) {
@@ -81759,7 +81787,25 @@ class NotionConverterRepository {
         }
         return null;
     }
+    buildLinkAnnotations(element) {
+        const { styles } = element;
+        if (!styles.bold &&
+            !styles.italic &&
+            !styles.strikethrough &&
+            !styles.underline &&
+            !styles.code) {
+            return undefined;
+        }
+        return {
+            bold: styles.bold,
+            italic: styles.italic,
+            strikethrough: styles.strikethrough,
+            underline: styles.underline,
+            code: styles.code,
+        };
+    }
     buildLinkRichTextItem(element) {
+        const annotations = this.buildLinkAnnotations(element);
         const pageId = this.extractNotionPageId(element.url);
         if (pageId) {
             return {
@@ -81768,6 +81814,7 @@ class NotionConverterRepository {
                     type: 'page',
                     page: { id: pageId },
                 },
+                ...(annotations ? { annotations } : {}),
             };
         }
         return {
@@ -81776,6 +81823,7 @@ class NotionConverterRepository {
                 content: element.text,
                 link: element.url.startsWith('http') ? { url: element.url } : null,
             },
+            ...(annotations ? { annotations } : {}),
         };
     }
     convertLink(element) {
@@ -83646,11 +83694,45 @@ class MarkdownParser extends elements_1.ParserRepository {
         const { content } = this.htmlParser.parse({ content: token.text });
         return content;
     }
+    /**
+     * If the link's inner content is a single styled inline token
+     * (e.g. `[**bold**](url)`, `[*italic*](url)`, `[`code`](url)`,
+     * `[~~strike~~](url)`), extract that style and use the inner text.
+     * Mixed inline content falls back to the link's plain text with no styles.
+     */
+    extractLinkLabelStyles(token) {
+        const innerTokens = token.tokens;
+        if (innerTokens?.length === 1) {
+            const [child] = innerTokens;
+            switch (child.type) {
+                case 'strong':
+                    return {
+                        text: child.text,
+                        styles: { bold: true },
+                    };
+                case 'em':
+                    return { text: child.text, styles: { italic: true } };
+                case 'del':
+                    return {
+                        text: child.text,
+                        styles: { strikethrough: true },
+                    };
+                case 'codespan':
+                    return {
+                        text: child.text,
+                        styles: { code: true },
+                    };
+            }
+        }
+        return { text: token.text };
+    }
     parseLinkToken(token) {
+        const { text, styles } = this.extractLinkLabelStyles(token);
         return new elements_1.LinkElement({
-            text: token.text,
+            text,
             url: token.href,
             filepath: this.parsingFilePath,
+            styles,
         });
     }
     parseTextToken(token) {
